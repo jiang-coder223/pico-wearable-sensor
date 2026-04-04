@@ -1,0 +1,8 @@
+!.vscode/*
+build/
+*.elf
+*.uf2
+*.map
+*.o
+CMakeFiles/
+CMakeCache.txt

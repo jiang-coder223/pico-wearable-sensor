@@ -169,6 +169,7 @@ int main() {
     max30102_init();
     max30102_setup();
     max30102_hr_init();
+    max30102_spo2_init();
     mqtt_init();
 
     uint32_t last_print = 0;

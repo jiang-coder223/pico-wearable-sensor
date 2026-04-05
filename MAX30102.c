@@ -11,6 +11,8 @@
 #define MIN_LAG 60
 #define MAX_LAG 100
 
+#define SPO2_BUF 100
+
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
 #define DEBUG_SPO2 0
@@ -30,6 +32,12 @@ static int last_best_lag = 0;
 static float last_confidence = 0;
 static int bad_count = 0;
 
+static float dc_red = 0;
+static float dc_ir  = 0;
+static float red_buf[SPO2_BUF];
+static float ir_buf[SPO2_BUF];
+static int spo2_idx = 0;
+static int spo2_value = 0;
 
 
 // driver
@@ -278,3 +286,61 @@ float max30102_get_confidence(void) {
 }
 
 // SpO2
+void max30102_spo2_init(void) {
+    dc_red = 0;
+    dc_ir  = 0;
+    spo2_idx = 0;
+    spo2_value = 0;
+}
+
+void max30102_spo2_update(uint32_t red, uint32_t ir) {
+
+    // finger detect（共用）
+    if (red < 8000) {
+        spo2_idx = 0;
+        return;
+    }
+
+    // DC tracking
+    dc_red = 0.95f * dc_red + 0.05f * red;
+    dc_ir  = 0.95f * dc_ir  + 0.05f * ir;
+
+    float ac_red = red - dc_red;
+    float ac_ir  = ir  - dc_ir;
+
+    red_buf[spo2_idx] = ac_red;
+    ir_buf[spo2_idx]  = ac_ir;
+    spo2_idx++;
+
+    if (spo2_idx < SPO2_BUF) return;
+
+    // RMS
+    float sum_r = 0, sum_i = 0;
+    for (int i = 0; i < SPO2_BUF; i++) {
+        sum_r += red_buf[i] * red_buf[i];
+        sum_i += ir_buf[i]  * ir_buf[i];
+    }
+
+    float ac_r = sqrtf(sum_r / SPO2_BUF);
+    float ac_i = sqrtf(sum_i / SPO2_BUF);
+
+    // signal too weak → ignore
+    if (ac_r < 50 || ac_i < 50 || dc_ir < 1) {
+        spo2_idx = 0;
+        return;
+    }
+
+    float R = (ac_r / dc_red) / (ac_i / dc_ir);
+
+    int spo2 = (int)(110 - 25 * R);
+
+    if (spo2 > 100) spo2 = 100;
+    if (spo2 < 70)  spo2 = 70;
+
+    spo2_value = spo2;
+    spo2_idx = 0;
+}
+
+int max30102_get_spo2(void) {
+    return spo2_value;
+}

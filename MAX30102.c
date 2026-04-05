@@ -302,7 +302,6 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
 
     // finger detect（共用）
     if (dc_red < 50000) {
-        spo2_idx = 0;
         return;
     }
 
@@ -329,7 +328,8 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
     float ratio_r = ac_r / dc_red;
     float ratio_i = ac_i / dc_ir;
 
-    if (ratio_r < 0.003f || ratio_i < 0.003f) {
+    if (ratio_r > 0.05f || ratio_i > 0.05f ||
+    ratio_r < 0.003f || ratio_i < 0.003f) {
         spo2_idx = 0;
         return;
     }
@@ -348,7 +348,10 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
     if (spo2 < 70)  spo2 = 70;
 
     // ===== [PATCH 4] smoothing =====
-    spo2_value = (int)(0.8f * spo2_value + 0.2f * spo2);
+    if (spo2_value == 0)
+        spo2_value = spo2;
+    else
+        spo2_value = 0.9f * spo2_value + 0.1f * spo2;
 
     spo2_idx = 0;
 

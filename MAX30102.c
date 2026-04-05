@@ -324,20 +324,34 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
     float ac_r = sqrtf(sum_r / SPO2_BUF);
     float ac_i = sqrtf(sum_i / SPO2_BUF);
 
-    // signal too weak → ignore
-    if (ac_r < 50 || ac_i < 50 || dc_ir < 1) {
+    // ===== [PATCH 1] Signal gating =====
+    float ratio_r = ac_r / dc_red;
+    float ratio_i = ac_i / dc_ir;
+
+    if (ratio_r < 0.003f || ratio_i < 0.003f) {
         spo2_idx = 0;
         return;
     }
-
+    // ===== [PATCH 2] R calculation =====
     float R = (ac_r / dc_red) / (ac_i / dc_ir);
+
+    // ===== [PATCH 2] R calculation =====
+    float R = (ac_r / dc_red) / (ac_i / dc_ir);
+
+    // ===== [PATCH 3] R range limit =====
+    if (R < 0.3f || R > 1.5f) {
+        spo2_idx = 0;
+        return;
+    }
 
     int spo2 = (int)(110 - 25 * R);
 
     if (spo2 > 100) spo2 = 100;
     if (spo2 < 70)  spo2 = 70;
 
-    spo2_value = spo2;
+    // ===== [PATCH 4] smoothing =====
+    spo2_value = (int)(0.8f * spo2_value + 0.2f * spo2);
+    
     spo2_idx = 0;
 }
 

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "global_defines.h"
 #include "stdlib.h"
+#include "math.h"
 
 #define SAMPLE_RATE 100
 #define WINDOW_SIZE 256
@@ -295,15 +296,15 @@ void max30102_spo2_init(void) {
 
 void max30102_spo2_update(uint32_t red, uint32_t ir) {
 
-    // finger detect（共用）
-    if (red < 8000) {
-        spo2_idx = 0;
-        return;
-    }
-
     // DC tracking
     dc_red = 0.95f * dc_red + 0.05f * red;
     dc_ir  = 0.95f * dc_ir  + 0.05f * ir;
+
+    // finger detect（共用）
+    if (dc_red < 50000) {
+        spo2_idx = 0;
+        return;
+    }
 
     float ac_red = red - dc_red;
     float ac_ir  = ir  - dc_ir;
@@ -335,9 +336,6 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
     // ===== [PATCH 2] R calculation =====
     float R = (ac_r / dc_red) / (ac_i / dc_ir);
 
-    // ===== [PATCH 2] R calculation =====
-    float R = (ac_r / dc_red) / (ac_i / dc_ir);
-
     // ===== [PATCH 3] R range limit =====
     if (R < 0.3f || R > 1.5f) {
         spo2_idx = 0;
@@ -351,8 +349,11 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
 
     // ===== [PATCH 4] smoothing =====
     spo2_value = (int)(0.8f * spo2_value + 0.2f * spo2);
-    
+
     spo2_idx = 0;
+
+    printf("R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n",
+    R, ratio_r, ratio_i);
 }
 
 int max30102_get_spo2(void) {

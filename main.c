@@ -10,7 +10,7 @@
 
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
-#define DEBUG_SPO2 0
+#define DEBUG_SPO2 1
 
 /* int main() {
     stdio_init_all();
@@ -182,8 +182,10 @@ int main() {
         max30102_read_fifo(&red, &ir);
 
         max30102_hr_update(red, ir);
+        max30102_spo2_update(red, ir);
 
         int bpm = max30102_get_bpm();
+        int spo2 = max30102_get_spo2();
 
         uint32_t now = to_ms_since_boot(get_absolute_time());
         

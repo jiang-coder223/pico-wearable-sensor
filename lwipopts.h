@@ -7,7 +7,7 @@
 
 #define MEM_ALIGNMENT 4
 
-// 🔥 核心：加大 heap
+// 加大 heap
 #define MEM_SIZE (20 * 1024)
 
 // TCP
@@ -24,10 +24,8 @@
 
 #define LWIP_NETIF_STATUS_CALLBACK 1
 
-// 🔥 關鍵（解決你 crash）
 #define MEMP_NUM_SYS_TIMEOUT 20
 
-// 🔥 建議一起加（避免下一個 crash）
 #define MEMP_NUM_TCP_SEG 32
 #define MEMP_NUM_TCP_PCB 5
 

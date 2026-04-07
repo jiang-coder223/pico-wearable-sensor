@@ -6,5 +6,7 @@ build/
 *.uf2
 *.map
 *.o
+MQTT.c
+MQTT.h
 CMakeFiles/
 CMakeCache.txt

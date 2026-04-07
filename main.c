@@ -97,9 +97,22 @@ int main() {
         
          // MQTT 1 Hz (Every 1000ms)
         if (now - last_mqtt >= 1000) {
+
             if (bpm > 0 && spo2 > 0) {
-                mqtt_publish_data(bpm, spo2);
+
+                static int last_bpm = 0;
+                static int last_spo2 = 0;
+
+                // 只在有變化才送（關鍵）
+                if (abs(bpm - last_bpm) >= 1 || abs(spo2 - last_spo2) >= 1) {
+
+                    mqtt_publish_data(bpm, spo2);
+
+                    last_bpm = bpm;
+                    last_spo2 = spo2;
+                }
             }
+
             last_mqtt = now;
         }
 

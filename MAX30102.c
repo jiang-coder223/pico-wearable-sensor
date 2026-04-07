@@ -43,6 +43,9 @@ static float last_R = 0;
 static float g_R = 0;
 static float g_ratio_r = 0;
 static float g_ratio_i = 0;
+static int reject_count = 0;
+static float R_history[5] = {0};
+static int R_idx = 0;
 
 
 // driver
@@ -121,7 +124,7 @@ void max30102_setup(void) {
     // 4. LED 電流設定 (暫存器 0x0C, 0x0D)
     // 0x24 約為 7.2mA。如果覺得數據太小可以調高到 0x3F (12.5mA)
     write_reg(MAX30102_LED1_PA, 0x3F); 
-    write_reg(MAX30102_LED2_PA, 0x3F); 
+    write_reg(MAX30102_LED2_PA, 0x10); 
     
     // 5. 重要：重設 FIFO 指標 (清空緩衝區)
     // 確保一開始讀取就是最新的數據，不會讀到重置前的殘留值
@@ -298,77 +301,83 @@ void max30102_spo2_init(void) {
     spo2_value = 0;
 }
 
-void max30102_spo2_update(uint32_t red, uint32_t ir) {
+void max30102_spo2_update(uint32_t red, uint32_t ir)
+{
+    static int init_count = 0;
 
-    // DC tracking
+    // ===== 初始化 =====
+    if (init_count < 50) {
+        dc_red = red;
+        dc_ir  = ir;
+        init_count++;
+        return;
+    }
+
+    // ===== DC tracking =====
     dc_red = 0.95f * dc_red + 0.05f * red;
     dc_ir  = 0.95f * dc_ir  + 0.05f * ir;
 
-    // finger detect（共用）
-    if (dc_red < 50000) {
-        spo2_idx = 0;
+    // ===== finger detect =====
+    if (dc_red < 10000) {
         spo2_value = 0;
         return;
     }
 
+    // ===== AC =====
     float ac_red = red - dc_red;
     float ac_ir  = ir  - dc_ir;
 
+    // ===== buffer =====
     red_buf[spo2_idx] = ac_red;
     ir_buf[spo2_idx]  = ac_ir;
     spo2_idx++;
 
     if (spo2_idx < SPO2_BUF) return;
+    spo2_idx = 0;
 
-    // RMS
-    float sum_r = 0, sum_i = 0;
-    for (int i = 0; i < SPO2_BUF; i++) {
-        sum_r += red_buf[i] * red_buf[i];
-        sum_i += ir_buf[i]  * ir_buf[i];
+    // ===== RMS (差分版，抗漂移) =====
+    float ac_r = 0;
+    float ac_i = 0;
+
+    for (int i = 1; i < SPO2_BUF; i++) {
+        float dr = red_buf[i] - red_buf[i-1];
+        float di = ir_buf[i]  - ir_buf[i-1];
+        ac_r += dr * dr;
+        ac_i += di * di;
     }
 
-    float ac_r = sqrtf(sum_r / SPO2_BUF);
-    float ac_i = sqrtf(sum_i / SPO2_BUF);
+    ac_r = sqrtf(ac_r / SPO2_BUF);
+    ac_i = sqrtf(ac_i / SPO2_BUF);
 
-    // ===== [PATCH 1] Signal gating =====
+    // ===== ratio =====
     float ratio_r = ac_r / dc_red;
     float ratio_i = ac_i / dc_ir;
+
     g_ratio_r = ratio_r;
     g_ratio_i = ratio_i;
 
-    if (ratio_r > 0.05f || ratio_i > 0.05f ||
-    ratio_r < 0.003f || ratio_i < 0.003f) {
-        spo2_idx = 0;
-        return;
-    }
-    // ===== [PATCH 2] R calculation =====
-    float R = (ac_r / dc_red) / (ac_i / dc_ir);
+    // ===== 基本 gating（極簡版）=====
+    if (ratio_r < 0.00005f || ratio_i < 0.00005f) return;
+    if (ratio_r > 0.05f   || ratio_i > 0.05f)   return;
+
+    // ===== R =====
+    float R = ratio_r / ratio_i;
     g_R = R;
 
-    // ===== [PATCH 3] R range limit =====
-    if (R < 0.4f || R > 1.0f) {
-        spo2_idx = 0;
-        return;
-    }
-    if (last_R != 0 && fabs(R - last_R) > 0.25f) {
-        spo2_idx = 0;
-        return;
-    }
+    // 合理範圍
+    if (R < 0.3f || R > 1.5f) return;
 
-    last_R = R;
-
-    int spo2 = (int)(110 - 25 * R);
+    // ===== SpO2 =====
+    int spo2 = (int)(104 - 17 * R);
 
     if (spo2 > 100) spo2 = 100;
     if (spo2 < 70)  spo2 = 70;
 
-    // ===== [PATCH 4] smoothing =====
-    if ((abs(spo2 - spo2_value) > 5))
+    // ===== smoothing（關鍵但簡單）=====
+    if (spo2_value == 0)
         spo2_value = spo2;
     else
-        spo2_value = 0.5f * spo2_value + 0.5f * spo2;
-
-    spo2_idx = 0;
+        spo2_value = 0.8f * spo2_value + 0.2f * spo2;
 }
 
 int max30102_get_spo2(void) {

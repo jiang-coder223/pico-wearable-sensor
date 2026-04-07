@@ -11,4 +11,8 @@
 // 如果之後有 LED 或按鈕，也寫在這裡
 #define HEART_RATE_LED_PIN 25 
 
+//Wifi 配置
+#define WIFI_SSID "your_ssid"
+#define WIFI_PASSWORD "your_password"
+
 #endif

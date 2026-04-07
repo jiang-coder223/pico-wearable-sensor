@@ -37,6 +37,7 @@ add_executable(main
     MPU6050.c 
     MAX30102.c
     MQTT.c
+    SSD1306.c
 )
 
 pico_set_program_name(main "main")

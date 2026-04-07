@@ -5,12 +5,13 @@
 #include "hardware/i2c.h"
 #include "MPU6050.h"
 #include "MAX30102.h"
+#include "SSD1306.h"
 #include "global_defines.h"
 #include "MQTT.h"
 
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
-#define DEBUG_SPO2 1
+#define DEBUG_SPO2 0
 
 /* int main() {
     stdio_init_all();
@@ -53,6 +54,7 @@
         else printf("ACTIVE\n");
     }
 } */
+
 /* int main() {
     stdio_init_all();
     while (!stdio_usb_connected()) { sleep_ms(100); }
@@ -152,7 +154,8 @@
         sleep_ms(10); 
     }
 } */
-int main() {
+
+/* int main() {
     // init all
     stdio_init_all();
     while (!stdio_usb_connected()) { sleep_ms(100); }
@@ -235,6 +238,32 @@ int main() {
             last_print = now;
         }
 
+        
+
         sleep_ms(10);
+    }
+} */
+
+int main() {
+    stdio_init_all();
+
+    i2c_init(I2C0_PORT, 400 * 1000);
+    gpio_set_function(I2C0_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(I2C0_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C0_SDA);
+    gpio_pull_up(I2C0_SCL);
+
+    ssd1306_init();
+    ssd1306_clear();
+
+    for (int i = 0; i < 1024; i++) {
+        buffer[i] = 0xFF;
+    }
+
+
+    ssd1306_update();
+
+    while (1) {
+        sleep_ms(1000);
     }
 }

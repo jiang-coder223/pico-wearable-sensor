@@ -40,6 +40,9 @@ static float ir_buf[SPO2_BUF];
 static int spo2_idx = 0;
 static int spo2_value = 0;
 static float last_R = 0;
+static float g_R = 0;
+static float g_ratio_r = 0;
+static float g_ratio_i = 0;
 
 
 // driver
@@ -330,6 +333,8 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
     // ===== [PATCH 1] Signal gating =====
     float ratio_r = ac_r / dc_red;
     float ratio_i = ac_i / dc_ir;
+    g_ratio_r = ratio_r;
+    g_ratio_i = ratio_i;
 
     if (ratio_r > 0.05f || ratio_i > 0.05f ||
     ratio_r < 0.003f || ratio_i < 0.003f) {
@@ -338,6 +343,7 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
     }
     // ===== [PATCH 2] R calculation =====
     float R = (ac_r / dc_red) / (ac_i / dc_ir);
+    g_R = R;
 
     // ===== [PATCH 3] R range limit =====
     if (R < 0.4f || R > 1.0f) {
@@ -363,11 +369,20 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
         spo2_value = 0.5f * spo2_value + 0.5f * spo2;
 
     spo2_idx = 0;
-
-    printf("R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n",
-    R, ratio_r, ratio_i);
 }
 
 int max30102_get_spo2(void) {
     return spo2_value;
+}
+
+float max30102_get_R(void) {
+    return g_R;
+}
+
+float max30102_get_ratio_r(void) {
+    return g_ratio_r;
+}
+
+float max30102_get_ratio_i(void) {
+    return g_ratio_i;
 }

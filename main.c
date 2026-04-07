@@ -11,7 +11,7 @@
 
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
-#define DEBUG_SPO2 1
+#define DEBUG_SPO2 0
 
 /* int main() {
     stdio_init_all();
@@ -55,106 +55,6 @@
     }
 } */
 
-/* int main() {
-    stdio_init_all();
-    while (!stdio_usb_connected()) { sleep_ms(100); }
-
-    printf("Start Autocorrelation Heart Rate Monitor\n");
-
-    i2c_init(I2C0_PORT, 400 * 1000);
-    gpio_set_function(I2C0_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(I2C0_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C0_SDA);
-    gpio_pull_up(I2C0_SCL);
-
-    max30102_init();
-    max30102_setup();
-
-    // 變數初始化
-    float data_buffer[WINDOW_SIZE] = {0};
-    int data_idx = 0;
-    int averaged_bpm = 0;
-    float lp = 0;
-    uint32_t last_print_time = 0;
-
-    while (true) {
-        uint32_t red, ir;
-        max30102_read_fifo(&red, &ir);
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-
-        if (red < 80000) { 
-            // 沒放手指：重置所有狀態
-            data_idx = 0;
-            averaged_bpm = 0;
-            lp = 0; 
-            
-            // 限制印出頻率：每 500ms 報一次，避免洗板
-            if (now - last_print_time >= 500) {
-                printf("Status: [ - ] Waiting for finger... (RED: %u)\n", red);
-                last_print_time = now;
-            }
-        } 
-        else {
-            // --- 有放手指：進入正常運算邏輯 ---
-            
-            //進入DSP 1. 預處理：去直流
-            if (lp == 0) lp = (float)red; 
-            lp = (lp * 0.96f) + (red * 0.04f); 
-            float ac_val = (float)red - lp;
-
-            // 2. 存入緩衝區
-            data_buffer[data_idx++] = ac_val;
-
-            // 3. 緩衝區滿了才計算 (2.56秒)
-            if (data_idx >= WINDOW_SIZE) {
-                float max_correlation = -1.0f;
-                int best_lag = -1;
-                float zero_lag_corr = 0;
-
-                for (int i = 0; i < WINDOW_SIZE; i++) 
-                    zero_lag_corr += data_buffer[i] * data_buffer[i];
-
-                for (int lag = MIN_LAG; lag <= MAX_LAG; lag++) {
-                    float correlation = 0;
-                    for (int i = 0; i < (WINDOW_SIZE - lag); i++) {
-                        correlation += data_buffer[i] * data_buffer[i + lag];
-                    }
-                    if (correlation > max_correlation) {
-                        max_correlation = correlation;
-                        best_lag = lag;
-                    }
-                }
-
-                // 4. 判定與顯示
-                if (best_lag > 0 && max_correlation > (zero_lag_corr * 0.3)) { 
-                    int current_bpm = (SAMPLE_RATE * 60) / best_lag;
-                    
-                    if (averaged_bpm == 0) averaged_bpm = current_bpm;
-                    else averaged_bpm = (averaged_bpm * 0.6f) + (current_bpm * 0.4f);
-                    
-                    printf("BPM: %d | Confidence: High | Lag: %d\n", averaged_bpm, best_lag);
-                } 
-                else {
-                    // 分析中狀態也限制印出頻率
-                    if (now - last_print_time >= 500) {
-                        printf("Status: [ ? ] Analyzing... Keep still\n");
-                        last_print_time = now;
-                    }
-                }
-
-                // 5. 滑動窗口
-                for (int i = 0; i < 128; i++) {
-                    data_buffer[i] = data_buffer[i + 128];
-                }
-                data_idx = 128; 
-            }
-        }
-        
-        // 核心：維持 100Hz 穩定採樣，不要隨便改這個 sleep
-        sleep_ms(10); 
-    }
-} */
-
 int main() {
     // init all
     stdio_init_all();
@@ -189,16 +89,17 @@ int main() {
 
         int bpm = max30102_get_bpm();
         int spo2 = max30102_get_spo2();
+        float R = max30102_get_R();
+        float ratio_r = max30102_get_ratio_r();
+        float ratio_i = max30102_get_ratio_i();
 
         uint32_t now = to_ms_since_boot(get_absolute_time());
         
          // MQTT 1 Hz (Every 1000ms)
         if (now - last_mqtt >= 1000) {
-
-            if (bpm > 0) {
-                mqtt_publish_bpm(bpm);
+            if (bpm > 0 && spo2 > 0) {
+                mqtt_publish_data(bpm, spo2);
             }
-
             last_mqtt = now;
         }
 
@@ -228,12 +129,14 @@ int main() {
             int lag = max30102_get_lag();
             float conf = max30102_get_confidence();
 
-            if (bpm > 0) {
-                printf("BPM: %d | Lag: %d | Conf: %.2f\n",
-                    bpm, lag, conf);
+            if (bpm > 0 || spo2 > 0) {
+                printf("BPM: %d | Lag: %d | Conf: %.2f\n"
+                        "SpO2: %d | R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n",
+                        bpm, lag, conf, spo2, R, ratio_r, ratio_i);
             } else {
-                printf("No valid signal | Lag: %d | Conf: %.2f\n",
-                    lag, conf);
+                printf("No valid signal | Lag: %d | Conf: %.2f\n"
+                        "R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n",
+                        lag, conf, R, ratio_r, ratio_i);
             }
             last_print = now;
         }

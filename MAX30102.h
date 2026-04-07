@@ -37,4 +37,7 @@ float max30102_get_confidence(void);
 void max30102_spo2_init(void);
 void max30102_spo2_update(uint32_t red, uint32_t ir);
 int max30102_get_spo2(void);
+float max30102_get_R(void);
+float max30102_get_ratio_r(void);
+float max30102_get_ratio_i(void);
 #endif

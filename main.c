@@ -11,7 +11,7 @@
 
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
-#define DEBUG_SPO2 0
+#define DEBUG_SPO2 1
 
 /* int main() {
     stdio_init_all();
@@ -155,7 +155,7 @@
     }
 } */
 
-/* int main() {
+int main() {
     // init all
     stdio_init_all();
     while (!stdio_usb_connected()) { sleep_ms(100); }
@@ -203,27 +203,27 @@
         }
 
         #if DEBUG_RAW
-            if (now - last_print >= 500) {
+            if (now - last_print >= 1000) {
             printf("RAW RED=%u IR=%u\n", red, ir);
             last_print = now;
         }
         #endif
 
         #if DEBUG_HR
-            if (now - last_print >= 500) {
+            if (now - last_print >= 1000) {
             printf("BPM=%d\n", bpm);
             last_print = now;
         }
         #endif
 
         #if DEBUG_SPO2
-            if (now - last_print >= 500) {
+            if (now - last_print >= 1000) {
             printf("SpO2=%d\n", spo2);
             last_print = now;
         }
         #endif
 
-        if (now - last_print >= 500) {
+        if (now - last_print >= 1000) {
 
             int lag = max30102_get_lag();
             float conf = max30102_get_confidence();
@@ -242,9 +242,9 @@
 
         sleep_ms(10);
     }
-} */
+}
 
-int main() {
+/* int main() {
     stdio_init_all();
 
     i2c_init(I2C0_PORT, 400 * 1000);
@@ -266,4 +266,4 @@ int main() {
     while (1) {
         sleep_ms(1000);
     }
-}
+} */

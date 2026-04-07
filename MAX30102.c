@@ -39,6 +39,7 @@ static float red_buf[SPO2_BUF];
 static float ir_buf[SPO2_BUF];
 static int spo2_idx = 0;
 static int spo2_value = 0;
+static float last_R = 0;
 
 
 // driver
@@ -302,6 +303,8 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
 
     // finger detect（共用）
     if (dc_red < 50000) {
+        spo2_idx = 0;
+        spo2_value = 0;
         return;
     }
 
@@ -337,10 +340,16 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
     float R = (ac_r / dc_red) / (ac_i / dc_ir);
 
     // ===== [PATCH 3] R range limit =====
-    if (R < 0.3f || R > 1.5f) {
+    if (R < 0.4f || R > 1.0f) {
         spo2_idx = 0;
         return;
     }
+    if (last_R != 0 && fabs(R - last_R) > 0.25f) {
+        spo2_idx = 0;
+        return;
+    }
+
+    last_R = R;
 
     int spo2 = (int)(110 - 25 * R);
 
@@ -348,10 +357,10 @@ void max30102_spo2_update(uint32_t red, uint32_t ir) {
     if (spo2 < 70)  spo2 = 70;
 
     // ===== [PATCH 4] smoothing =====
-    if (spo2_value == 0)
+    if ((abs(spo2 - spo2_value) > 5))
         spo2_value = spo2;
     else
-        spo2_value = 0.9f * spo2_value + 0.1f * spo2;
+        spo2_value = 0.5f * spo2_value + 0.5f * spo2;
 
     spo2_idx = 0;
 

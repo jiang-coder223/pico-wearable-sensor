@@ -384,8 +384,8 @@ void max30102_spo2_update(uint32_t red, uint32_t ir)
     float balance = ratio_r / ratio_i;
 
     // 避免兩者太接近（典型 noise 特徵）
-    if (balance > 0.9f && balance < 1.1f) {
-        return;
+    if (balance > 0.95f && balance < 1.05f && signal_strength < 0.0003f) {
+    return;
     }
 
     // ===== 基本 gating（極簡版）=====

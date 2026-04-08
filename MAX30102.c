@@ -9,7 +9,7 @@
 #define SAMPLE_RATE 100
 #define WINDOW_SIZE 256
 #define SLIDE_SIZE 128
-#define MIN_LAG 60
+#define MIN_LAG 50
 #define MAX_LAG 100
 
 #define SPO2_BUF 100
@@ -200,13 +200,28 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
         for (int i = 0; i < WINDOW_SIZE; i++)
             zero_corr += data_buffer[i] * data_buffer[i];
 
+        float best_score = -1e9;
+
         for (int lag = MIN_LAG; lag <= MAX_LAG; lag++) {
             float corr = 0;
+
             for (int i = 0; i < (WINDOW_SIZE - lag); i++) {
                 corr += data_buffer[i] * data_buffer[i + lag];
             }
+
             if (corr > max_corr) {
                 max_corr = corr;
+            }
+
+            float penalty = 0;
+            if (last_lag != 0) {
+                penalty = fabs(lag - last_lag) * 0.01f;
+            }
+
+            float score = corr - penalty;
+
+            if (score > best_score) {
+                best_score = score;
                 best_lag = lag;
             }
         }
@@ -215,8 +230,8 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
 
         
 
-        if (confidence < 0.4f && last_lag != 0) {
-            best_lag = last_lag;
+        if (confidence < 0.4f) {
+            goto skip;
         }
 
         last_best_lag = best_lag;
@@ -249,7 +264,7 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
 
                 if (diff < 12) {
                         // ✔ 正常範圍 → 做平滑追蹤
-                        best_lag = (int)(0.7f * last_lag + 0.3f * best_lag);
+                        best_lag = (int)(0.5f * last_lag + 0.5f * best_lag);
                 }
             }
 
@@ -353,31 +368,55 @@ void max30102_spo2_update(uint32_t red, uint32_t ir)
     float ratio_r = ac_r / dc_red;
     float ratio_i = ac_i / dc_ir;
 
+    // ===== 品質 gating（關鍵）=====
+    float signal_strength = ratio_r + ratio_i;
+
+    // 太弱（雜訊）
+    if (signal_strength < 0.0001f) return;
+
+    // 太強（晃動 / 壓太緊）
+    if (signal_strength > 0.01f) return;
+
     g_ratio_r = ratio_r;
     g_ratio_i = ratio_i;
 
+    // ===== 結構檢查（避免假R）=====
+    float balance = ratio_r / ratio_i;
+
+    // 避免兩者太接近（典型 noise 特徵）
+    if (balance > 0.9f && balance < 1.1f) {
+        return;
+    }
+
     // ===== 基本 gating（極簡版）=====
-    if (ratio_r < 0.00005f || ratio_i < 0.00005f) return;
-    if (ratio_r > 0.05f   || ratio_i > 0.05f)   return;
+    if (ratio_r < 0.00003f || ratio_i < 0.00003f) return;
+    if (ratio_r > 0.02f   || ratio_i > 0.02f)   return;
 
     // ===== R =====
     float R = ratio_r / ratio_i;
-    g_R = R;
 
     // 合理範圍
-    if (R < 0.3f || R > 1.5f) return;
+    if (R < 0.3f || R > 0.9f) return;
+
+    g_R = R;
+    static float last_R = 0;
+
+    if (last_R != 0 && fabs(R - last_R) > 0.1f) {
+        return;
+    }
 
     // ===== SpO2 =====
-    int spo2 = (int)(104 - 17 * R);
+    last_R = R;
+    int spo2 = (int)(106 - 18 * R);
 
     if (spo2 > 100) spo2 = 100;
     if (spo2 < 70)  spo2 = 70;
 
-    // ===== smoothing（關鍵但簡單）=====
+    // ===== smoothing =====
     if (spo2_value == 0)
         spo2_value = spo2;
     else
-        spo2_value = 0.8f * spo2_value + 0.2f * spo2;
+        spo2_value = 0.6f * spo2_value + 0.4f * spo2;
 }
 
 int max30102_get_spo2(void) {

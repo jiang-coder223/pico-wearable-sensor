@@ -12,48 +12,8 @@
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
 #define DEBUG_SPO2 0
-
-/* int main() {
-    stdio_init_all();
-
-    // I2C 初始化
-    i2c_init(I2C0_PORT, 400 * 1000);
-    gpio_set_function(I2C0_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(I2C0_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C0_SDA);
-    gpio_pull_up(I2C0_SCL);
-
-    // MPU6050 初始化與校準
-    mpu6050_init();
-    sleep_ms(1000);
-    mpu6050_calibrate();
-
-    while (true) {
-        int total_activity_sum = 0;
-        for (int i = 0; i < 50; i++) {
-            int16_t ax, ay, az, gx, gy, gz;
-            mpu6050_read_accel(&ax, &ay, &az);
-            mpu6050_read_gyro(&gx, &gy, &gz);
-
-            // 扣除 offset
-            ax -= ax_offset; ay -= ay_offset; az -= az_offset;
-            gx -= gx_offset; gy -= gy_offset; gz -= gz_offset;
-
-            int acc_act = abs(ax) + abs(ay) + abs(az);
-            int gyro_act = abs(gx) + abs(gy) + abs(gz);
-
-            if (acc_act < 500) acc_act = 0;
-            if (gyro_act < 300) gyro_act = 0;
-
-            total_activity_sum += (acc_act + (gyro_act / 4));
-            sleep_ms(20);
-        }
-
-        printf("SUM=%d -> ", total_activity_sum);
-        if (total_activity_sum < 50000) printf("STATIC\n");
-        else printf("ACTIVE\n");
-    }
-} */
+#define DEBUG_IMU 0
+#define DEBUG_ALL 1
 
 int main() {
     // init all
@@ -73,13 +33,22 @@ int main() {
     max30102_setup();
     max30102_hr_init();
     max30102_spo2_init();
+    mpu6050_init();
+    mpu6050_calibrate();
+    SSD1306_init();
+    SSD1306_clear();
     mqtt_init();
 
     uint32_t last_print = 0;
     uint32_t last_mqtt = 0;
+    uint32_t last_oled = 0;
+    static int no_finger_count = 0;
+
+    SSD1306_update();
 
     while (1) {
         mqtt_loop();
+        mpu6050_get_activity_step();
 
         uint32_t red, ir;
         max30102_read_fifo(&red, &ir);
@@ -95,22 +64,45 @@ int main() {
 
         uint32_t now = to_ms_since_boot(get_absolute_time());
         
+        if (ratio_i < 0.00003f) {
+            no_finger_count++;
+        } else {
+            no_finger_count = 0;
+        }
+
+        if (no_finger_count > 200) {
+            bpm = 0;
+            spo2 = 0;
+        }
+
+            int activity = mpu6050_get_activity();
+            int state    = mpu6050_get_state();
+
          // MQTT 1 Hz (Every 1000ms)
         if (now - last_mqtt >= 1000) {
 
+            static int last_bpm = 0;
+            static int last_spo2 = 0;
+            static int last_state = -1;
+
+            int changed = 0;
+
+            // HR / SpO2
             if (bpm > 0 && spo2 > 0) {
-
-                static int last_bpm = 0;
-                static int last_spo2 = 0;
-
-                // 只在有變化才送（關鍵）
                 if (abs(bpm - last_bpm) >= 1 || abs(spo2 - last_spo2) >= 1) {
-
-                    mqtt_publish_data(bpm, spo2);
-
+                    changed = 1;
                     last_bpm = bpm;
                     last_spo2 = spo2;
                 }
+            }
+
+            if (state != last_state) {
+                changed = 1;
+                last_state = state;
+            }
+
+            if (changed) {
+                mqtt_publish_data(bpm, spo2, state);
             }
 
             last_mqtt = now;
@@ -137,49 +129,54 @@ int main() {
         }
         #endif
 
+        #if DEBUG_IMU
+            if (now - last_print >= 1000) {
+            int16_t ax, ay, az, gx, gy, gz;
+            mpu6050_read_accel(&ax, &ay, &az);
+            mpu6050_read_gyro(&gx, &gy, &gz);
+
+            printf("IMU: ACT=%d | STATE=%s\n"
+                "ACC: %d %d %d | GYRO: %d %d %d\n",
+                activity,
+                (state == 0) ? "STATIC" : "ACTIVE",
+                ax, ay, az, gx, gy, gz);
+            }
+        #endif
+
+        #if DEBUG_ALL
         if (now - last_print >= 1000) {
 
             int lag = max30102_get_lag();
             float conf = max30102_get_confidence();
 
+            const char *state_str = (state == 0) ? "STATIC" : "ACTIVE";
+
             if (bpm > 0 || spo2 > 0) {
-                printf("BPM: %d | Lag: %d | Conf: %.2f\n"
-                        "SpO2: %d | R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n",
-                        bpm, lag, conf, spo2, R, ratio_r, ratio_i);
+                printf("State: %s \n"
+                    "BPM: %d | Lag: %d | Conf: %.2f \n"
+                    "SpO2: %d | R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n",
+                    state_str, 
+                    bpm, lag, conf,
+                    spo2, R, ratio_r, ratio_i);
             } else {
-                printf("No valid signal | Lag: %d | Conf: %.2f\n"
-                        "R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n",
-                        lag, conf, R, ratio_r, ratio_i);
+                printf("No valid signal\n"
+                    "BPM: %d | Lag: %d | Conf: %.2f \n"
+                    "SpO2: %d | R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n", 
+                    bpm, lag, conf,
+                    spo2, R, ratio_r, ratio_i);
             }
+
             last_print = now;
         }
+        #endif
 
+        if (now - last_oled >= 500) {
+            display_update(bpm, spo2, state);
+            last_oled = now;
+        }
         
 
         sleep_ms(10);
     }
 }
 
-/* int main() {
-    stdio_init_all();
-
-    i2c_init(I2C0_PORT, 400 * 1000);
-    gpio_set_function(I2C0_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(I2C0_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C0_SDA);
-    gpio_pull_up(I2C0_SCL);
-
-    ssd1306_init();
-    ssd1306_clear();
-
-    for (int i = 0; i < 1024; i++) {
-        buffer[i] = 0xFF;
-    }
-
-
-    ssd1306_update();
-
-    while (1) {
-        sleep_ms(1000);
-    }
-} */

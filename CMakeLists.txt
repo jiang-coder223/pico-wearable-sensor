@@ -58,6 +58,16 @@ target_link_libraries(main
 # --- 包含目錄設定 ---
 target_include_directories(main PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel/include
+    ${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel/portable/GCC/ARM_CM0
 )
 
+target_sources(main PRIVATE
+    FreeRTOS-Kernel/tasks.c
+    FreeRTOS-Kernel/queue.c
+    FreeRTOS-Kernel/list.c
+    FreeRTOS-Kernel/timers.c
+    FreeRTOS-Kernel/portable/GCC/ARM_CM0/port.c
+    FreeRTOS-Kernel/portable/MemMang/heap_4.c
+)
 pico_add_extra_outputs(main)

@@ -8,6 +8,9 @@
 #include "SSD1306.h"
 #include "global_defines.h"
 #include "MQTT.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
 
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
@@ -15,20 +18,34 @@
 #define DEBUG_IMU 0
 #define DEBUG_ALL 1
 
+QueueHandle_t sensorQueue;
+
+typedef struct {
+    uint32_t red;
+    uint32_t ir;
+} sensor_data_t;
+
+void SensorTask(void *param);
+void ImuTask(void *param);
+void DisplayTask(void *param);
+void MqttTask(void *param);
+
 int main() {
-    // init all
+
     stdio_init_all();
     while (!stdio_usb_connected()) { sleep_ms(100); }
     sleep_ms(500);
 
-    printf("Start Autocorrelation Heart Rate Monitor\n");
+    printf("Start RTOS System\n");
 
+    // I2C init
     i2c_init(I2C0_PORT, 400 * 1000);
     gpio_set_function(I2C0_SDA, GPIO_FUNC_I2C);
     gpio_set_function(I2C0_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(I2C0_SDA);
     gpio_pull_up(I2C0_SCL);
 
+    // init modules
     max30102_init();
     max30102_setup();
     max30102_hr_init();
@@ -39,144 +56,81 @@ int main() {
     SSD1306_clear();
     mqtt_init();
 
-    uint32_t last_print = 0;
-    uint32_t last_mqtt = 0;
-    uint32_t last_oled = 0;
-    static int no_finger_count = 0;
+    // 建 queue
+    sensorQueue = xQueueCreate(1, sizeof(sensor_data_t));
 
-    SSD1306_update();
+    // 建 task
+    xTaskCreate(SensorTask, "Sensor", 2048, NULL, 3, NULL);
+    xTaskCreate(ImuTask, "IMU", 1024, NULL, 2, NULL);
+    xTaskCreate(MqttTask, "MQTT", 2048, NULL, 1, NULL);
+    xTaskCreate(DisplayTask, "Display", 1024, NULL, 1, NULL);
+
+    // 啟動 RTOS
+    vTaskStartScheduler();
+
+    while (1); 
+}
+
+void SensorTask(void *param) {
+    TickType_t last = xTaskGetTickCount();
 
     while (1) {
-        mqtt_loop();
-        mpu6050_get_activity_step();
+        sensor_data_t data;
 
-        uint32_t red, ir;
-        max30102_read_fifo(&red, &ir);
+        max30102_read_fifo(&data.red, &data.ir);
 
-        max30102_hr_update(red, ir);
-        max30102_spo2_update(red, ir);
+        max30102_hr_update(data.red, data.ir);
+        max30102_spo2_update(data.red, data.ir);
 
-        int bpm = max30102_get_bpm();
-        int spo2 = max30102_get_spo2();
-        float R = max30102_get_R();
-        float ratio_r = max30102_get_ratio_r();
-        float ratio_i = max30102_get_ratio_i();
+        xQueueOverwrite(sensorQueue, &data);
 
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        
-        if (ratio_i < 0.00003f) {
-            no_finger_count++;
-        } else {
-            no_finger_count = 0;
-        }
-
-        if (no_finger_count > 200) {
-            bpm = 0;
-            spo2 = 0;
-        }
-
-            int activity = mpu6050_get_activity();
-            int state    = mpu6050_get_state();
-
-         // MQTT 1 Hz (Every 1000ms)
-        if (now - last_mqtt >= 1000) {
-
-            static int last_bpm = 0;
-            static int last_spo2 = 0;
-            static int last_state = -1;
-
-            int changed = 0;
-
-            // HR / SpO2
-            if (bpm > 0 && spo2 > 0) {
-                if (abs(bpm - last_bpm) >= 1 || abs(spo2 - last_spo2) >= 1) {
-                    changed = 1;
-                    last_bpm = bpm;
-                    last_spo2 = spo2;
-                }
-            }
-
-            if (state != last_state) {
-                changed = 1;
-                last_state = state;
-            }
-
-            if (changed) {
-                mqtt_publish_data(bpm, spo2, state);
-            }
-
-            last_mqtt = now;
-        }
-
-        #if DEBUG_RAW
-            if (now - last_print >= 1000) {
-            printf("RAW RED=%u IR=%u\n", red, ir);
-            last_print = now;
-        }
-        #endif
-
-        #if DEBUG_HR
-            if (now - last_print >= 1000) {
-            printf("BPM=%d\n", bpm);
-            last_print = now;
-        }
-        #endif
-
-        #if DEBUG_SPO2
-            if (now - last_print >= 1000) {
-            printf("SpO2=%d\n", spo2);
-            last_print = now;
-        }
-        #endif
-
-        #if DEBUG_IMU
-            if (now - last_print >= 1000) {
-            int16_t ax, ay, az, gx, gy, gz;
-            mpu6050_read_accel(&ax, &ay, &az);
-            mpu6050_read_gyro(&gx, &gy, &gz);
-
-            printf("IMU: ACT=%d | STATE=%s\n"
-                "ACC: %d %d %d | GYRO: %d %d %d\n",
-                activity,
-                (state == 0) ? "STATIC" : "ACTIVE",
-                ax, ay, az, gx, gy, gz);
-            }
-        #endif
-
-        #if DEBUG_ALL
-        if (now - last_print >= 1000) {
-
-            int lag = max30102_get_lag();
-            float conf = max30102_get_confidence();
-
-            const char *state_str = (state == 0) ? "STATIC" : "ACTIVE";
-
-            if (bpm > 0 || spo2 > 0) {
-                printf("State: %s \n"
-                    "BPM: %d | Lag: %d | Conf: %.2f \n"
-                    "SpO2: %d | R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n",
-                    state_str, 
-                    bpm, lag, conf,
-                    spo2, R, ratio_r, ratio_i);
-            } else {
-                printf("No valid signal\n"
-                    "BPM: %d | Lag: %d | Conf: %.2f \n"
-                    "SpO2: %d | R=%.3f ACr/DC=%.4f ACi/DC=%.4f\n", 
-                    bpm, lag, conf,
-                    spo2, R, ratio_r, ratio_i);
-            }
-
-            last_print = now;
-        }
-        #endif
-
-        if (now - last_oled >= 500) {
-            display_update(bpm, spo2, state);
-            last_oled = now;
-        }
-        
-
-        sleep_ms(10);
+        vTaskDelayUntil(&last, pdMS_TO_TICKS(10)); // 100Hz
     }
 }
 
+void ImuTask(void *param) {
+    while (1) {
+        mpu6050_get_activity_step();
+        vTaskDelay(pdMS_TO_TICKS(100)); // 10Hz
+    }
+}
+
+void DisplayTask(void *param) {
+    while (1) {
+
+        int bpm = max30102_get_bpm();
+        int spo2 = max30102_get_spo2();
+        int state = mpu6050_get_state();
+
+        display_update(bpm, spo2, state);
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void MqttTask(void *param) {
+    sensor_data_t data;
+    TickType_t lastSend = 0;
+
+    while (1) {
+        mqtt_loop();
+
+        if (xQueueReceive(sensorQueue, &data, portMAX_DELAY)) {
+
+            TickType_t now = xTaskGetTickCount();
+
+            if (now - lastSend >= pdMS_TO_TICKS(1000)) {
+
+                int bpm = max30102_get_bpm();
+                int spo2 = max30102_get_spo2();
+                int state = mpu6050_get_state();
+
+                mqtt_publish_data(bpm, spo2, state);
+
+                lastSend = now;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}

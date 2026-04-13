@@ -33,4 +33,16 @@
 #define INCLUDE_vTaskDelayUntil   1
 #define INCLUDE_vTaskDelete       1
 
+#define configUSE_TIMERS 1
+#define configTIMER_TASK_PRIORITY 1
+#define configTIMER_QUEUE_LENGTH 10
+#define configTIMER_TASK_STACK_DEPTH 1024
+#define configCHECK_FOR_STACK_OVERFLOW 2
+#define configUSE_MALLOC_FAILED_HOOK 1
+#define INCLUDE_xTaskGetSchedulerState 1
+#define INCLUDE_xTimerPendFunctionCall 1
+
+
+#define configASSERT(x) if((x) == 0) { portDISABLE_INTERRUPTS(); for(;;); }
+
 #endif

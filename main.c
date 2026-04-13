@@ -30,6 +30,7 @@ void ImuTask(void *param);
 void DisplayTask(void *param);
 void MqttTask(void *param);
 
+
 int main() {
 
     stdio_init_all();
@@ -133,4 +134,14 @@ void MqttTask(void *param) {
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
+}
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
+    printf("Stack overflow: %s\n", pcTaskName);
+    while (1);
+}
+
+void vApplicationMallocFailedHook(void) {
+    printf("Malloc failed\n");
+    while (1);
 }

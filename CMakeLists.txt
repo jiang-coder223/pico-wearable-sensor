@@ -59,7 +59,8 @@ target_link_libraries(main
 target_include_directories(main PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel/include
-    ${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel/portable/GCC/ARM_CM0
+    ${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040
+    ${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/include
 )
 
 target_sources(main PRIVATE
@@ -67,7 +68,8 @@ target_sources(main PRIVATE
     FreeRTOS-Kernel/queue.c
     FreeRTOS-Kernel/list.c
     FreeRTOS-Kernel/timers.c
-    FreeRTOS-Kernel/portable/GCC/ARM_CM0/port.c
+    FreeRTOS-Kernel/event_groups.c
+    FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/port.c
     FreeRTOS-Kernel/portable/MemMang/heap_4.c
 )
 pico_add_extra_outputs(main)

@@ -46,6 +46,11 @@ static float g_ratio_i = 0;
 static int reject_count = 0;
 static float R_history[5] = {0};
 static int R_idx = 0;
+static uint32_t last_peak_time = 0;
+static int peak_bpm = 0;
+static float peak_threshold = 50.0f;
+static float prev_hp_for_peak = 0;
+static int refractory = 0;
 
 
 // driver
@@ -155,15 +160,24 @@ int max30102_get_bpm(void) {
 
 void max30102_hr_update(uint32_t red, uint32_t ir) {
 
+            static int dbg_count = 0;
+            dbg_count++;
+            int print_now = (dbg_count % 50 == 0);
+
     uint32_t diff = (red > prev_red) ? (red - prev_red) : (prev_red - red);
     prev_red = red;
+
+    if (diff > 2000) {
+        stable_count = 0;
+        return;
+    }
 
     if (diff < 2000) stable_count++;
     else stable_count = 0;
 
     int valid = (stable_count >= 5 && diff < 8000);
 
-    // finger detect
+    // ===== finger detect =====
     if (!has_signal) {
         if (red > 8000) has_signal = 1;
     } else {
@@ -172,22 +186,53 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
 
     if (!has_signal) {
         max30102_hr_init();
+        averaged_bpm = 0;
         return;
     }
 
-    // DC removal
+            if (print_now) {
+                printf("[RAW] red=%lu diff=%lu stable=%d\n", red, diff, stable_count);
+            }
+
+    // ===== DC removal =====
     if (lp == 0) lp = (float)red;
     lp = (lp * 0.92f) + (red * 0.08f);
 
-    float ac_val = (float)red - lp;
+    // ===== AC Amplifier =====
+    float ac_val = ((float)red - lp) * 5.0f;
 
-    // smooth
+    if (fabs(ac_val) > 5000.0f) {
+        return;
+    }
 
-    float alpha = 0.18f;
-    smooth = alpha * ac_val + (1 - alpha) * smooth;
+    // ===== smoothing =====
+    smooth = 0.4f * ac_val + 0.6f * smooth;
 
     static float hp = 0;
-    hp = smooth - 0.95f * hp;
+    static float prev_hp = 0;
+
+    hp = smooth - 0.8f * hp;
+
+    // ===== spike limiter（限制最大幅度）=====
+    if (hp > 1000.0f) hp = 1000.0f;
+    if (hp < -1000.0f) hp = -1000.0f;
+
+    // ===== jump filter（忽略瞬間爆衝）=====
+    if (fabs(hp - prev_hp) > 2000.0f) {
+        hp = prev_hp;
+    }
+
+    prev_hp = hp;
+
+    if (print_now) {
+        printf("[FILTER] ac=%.1f smooth=%.1f hp=%.1f\n", ac_val, smooth, hp);
+    }
+
+    
+    // ===== validity filter =====
+    if (fabs(hp) > 700.0f) {
+        goto skip;   // 被 clamp 的爆訊號，無效
+    }
 
     data_buffer[data_idx++] = hp;
 
@@ -226,11 +271,15 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
             }
         }
 
+
+        // ===== confidence =====
         float confidence = max_corr / zero_corr;
 
-        
+        if (print_now) {
+            printf("[LAG] best=%d conf=%.2f\n", best_lag, confidence);
+        }
 
-        if (confidence < 0.4f) {
+        if (confidence < 0.35f) {
             goto skip;
         }
 
@@ -242,7 +291,7 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
         if (last_lag != 0) {
             int diff = abs(best_lag - last_lag);
 
-            if (confidence < 0.2f || diff > 12) {
+            if (confidence < 0.35f || diff > 12) {
                 bad_count++;
             } else {
                 bad_count = 0;
@@ -253,11 +302,25 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
                 bad_count = 5;
         }
 
-        if (best_lag > 0 && confidence > 0.4f) {
+        if (best_lag > 0 && confidence > 0.35f) {
 
             bad_count = 0;
             if (last_lag != 0 && abs(best_lag - last_lag) > 12)
                 best_lag = last_lag;
+
+            // 半週修正（非常關鍵）
+            if (best_lag * 2 <= MAX_LAG) {
+                int lag2 = best_lag * 2;
+
+                float corr2 = 0;
+                for (int i = 0; i < WINDOW_SIZE - lag2; i++) {
+                    corr2 += data_buffer[i] * data_buffer[i + lag2];
+                }
+
+                if (corr2 > max_corr * 0.75f) {
+                    best_lag = lag2;
+                }
+            }
 
             if (last_lag != 0) {
                 int diff = abs(best_lag - last_lag);
@@ -268,7 +331,7 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
                 }
             }
 
-            if (best_lag < 50 || best_lag > 100)
+            if (best_lag < 50 || best_lag > 120)
                 goto skip;
 
             int bpm = (SAMPLE_RATE * 60) / best_lag;

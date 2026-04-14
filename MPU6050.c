@@ -68,9 +68,6 @@ int mpu6050_get_activity_step(void) {
 
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
-    if (now - last_sample_time < 10) {
-        return -1;
-    }
     last_sample_time = now;
 
     int16_t ax, ay, az, gx, gy, gz;

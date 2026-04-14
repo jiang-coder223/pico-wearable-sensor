@@ -12,7 +12,7 @@
 
 #define configMAX_PRIORITIES      5
 #define configMINIMAL_STACK_SIZE  128
-#define configTOTAL_HEAP_SIZE     (10 * 1024)
+#define configTOTAL_HEAP_SIZE     (50 * 1024)
 
 #define configMAX_TASK_NAME_LEN   16
 

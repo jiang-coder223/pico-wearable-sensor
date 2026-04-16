@@ -70,8 +70,8 @@ void mpu6050_calibrate(void) {
     gy_offset = gy_s / 200;
     gz_offset = gz_s / 200;
 
-    printf("Offset: ax=%d ay=%d az=%d\n", ax_offset, ay_offset, az_offset);
-    printf("Calibrate Done!\n");
+    /* printf("Offset: ax=%d ay=%d az=%d\n", ax_offset, ay_offset, az_offset);
+    printf("Calibrate Done!\n"); */
 }
 
 int mpu6050_get_activity_step(void) {
@@ -132,22 +132,9 @@ int mpu6050_get_activity_step(void) {
     }
 
     // ===== debug =====
-    printf("[IMU] dyn=%.3f E=%.3f base=%.3f | state=%d\n",
+    /* printf("[IMU] dyn=%.3f E=%.3f base=%.3f | state=%d\n",
         dynamic, energy, baseline, state);
-
+ */
     return state;
 }
 
-int mpu6050_get_state(void) {
-    return state;
-}
-
-int mpu6050_get_activity(void) {
-    return last_activity;
-}
-
-void mpu6050_reset(void) {
-    last_activity = 0;
-    state = 0;
-    prev_ax = prev_ay = prev_az = 0;
-}

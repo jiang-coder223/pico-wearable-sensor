@@ -21,8 +21,5 @@ void mpu6050_read_accel(int16_t *ax, int16_t *ay, int16_t *az);
 void mpu6050_read_gyro(int16_t *gx, int16_t *gy, int16_t *gz);
 void mpu6050_calibrate(void);
 int mpu6050_get_activity_step(void);
-int mpu6050_get_state(void);
-int mpu6050_get_activity(void);
-void mpu6050_reset(void);
 
 #endif

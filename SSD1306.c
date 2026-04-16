@@ -151,21 +151,37 @@ void SSD1306_draw_char(int x, int y, char c) {
     }
 }
 
-void display_update(int bpm, int spo2, int state) {
+void display_update(int bpm, int spo2, int state, int trend) {
     SSD1306_clear();
 
     char line1[20];
     char line2[20];
     char line3[20];
+    char line4[20];
+
+    const char* trend_str[] = {
+        "STABLE",
+        "UP",
+        "DOWN"
+    };
+    const char* state_str[] = {
+        "REST",
+        "MOVE",
+        "ACTIVE"
+    };
+
+    if (state < 0 || state > 2) state = 0;
+    if (trend < 0 || trend > 2) trend = 0;  // 防呆
 
     snprintf(line1, sizeof(line1), "BPM: %d", bpm);
     snprintf(line2, sizeof(line2), "SPO2: %d%%", spo2);
-    snprintf(line3, sizeof(line3), "STATE: %s",
-            state == 0 ? "STATIC" : "ACTIVE");
+    snprintf(line3, sizeof(line3), "STATE: %s", state_str[state]);;
+    snprintf(line4, sizeof(line4), "TREND: %s", trend_str[trend]);
 
     SSD1306_draw_string(0, 0, line1);
     SSD1306_draw_string(0, 16, line2);
     SSD1306_draw_string(0, 32, line3);
+    SSD1306_draw_string(0, 48, line4);
 
     SSD1306_update();
 }

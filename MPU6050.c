@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "global_defines.h"
+#include "math.h"
 
 static int last_activity = 0;
 static int state = 0;
@@ -37,89 +38,104 @@ void mpu6050_read_gyro(int16_t *gx, int16_t *gy, int16_t *gz) {
 }
 
 void mpu6050_calibrate(void) {
+
     int32_t ax_s = 0, ay_s = 0, az_s = 0;
     int32_t gx_s = 0, gy_s = 0, gz_s = 0;
+
     printf("Calibrating... Keep device still\n");
-    for (int i = 0; i < 100; i++) {
+
+    for (int i = 0; i < 200; i++) {
+
         int16_t ax, ay, az, gx, gy, gz;
+
         mpu6050_read_accel(&ax, &ay, &az);
         mpu6050_read_gyro(&gx, &gy, &gz);
-        ax_s += ax; ay_s += ay; az_s += az;
-        gx_s += gx; gy_s += gy; gz_s += gz;
-        sleep_ms(10);
+
+        ax_s += ax;
+        ay_s += ay;
+        az_s += az;
+
+        gx_s += gx;
+        gy_s += gy;
+        gz_s += gz;
+
+        sleep_ms(5);
     }
-    ax_offset = ax_s / 100;
-    ay_offset = ay_s / 100;
-    az_offset = (az_s / 100) - 16384; // 扣除 Z 軸重力
-    gx_offset = gx_s / 100;
-    gy_offset = gy_s / 100;
-    gz_offset = gz_s / 100;
+
+    ax_offset = ax_s / 200;
+    ay_offset = ay_s / 200;
+    az_offset = az_s / 200;
+
+    gx_offset = gx_s / 200;
+    gy_offset = gy_s / 200;
+    gz_offset = gz_s / 200;
+
+    printf("Offset: ax=%d ay=%d az=%d\n", ax_offset, ay_offset, az_offset);
     printf("Calibrate Done!\n");
 }
 
 int mpu6050_get_activity_step(void) {
 
-    static uint32_t last_sample_time = 0;
-    static int active_count = 0;
-    static int static_count = 0;
+    static float energy = 0.0f;
+    static float baseline = 0.02f;   // 初始靜止噪聲
+    static int state = 0;            // 0=REST,1=MOVE,2=ACTIVE
 
-    //  sliding window + EMA
-    static int activity = 0;
-
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    last_sample_time = now;
-
-    int16_t ax, ay, az, gx, gy, gz;
-
+    int16_t ax, ay, az;
     mpu6050_read_accel(&ax, &ay, &az);
-    mpu6050_read_gyro(&gx, &gy, &gz);
 
-    ax -= ax_offset; ay -= ay_offset; az -= az_offset;
-    gx -= gx_offset; gy -= gy_offset; gz -= gz_offset;
+    // ===== normalize =====
+    float ax_g = ax / 16384.0f;
+    float ay_g = ay / 16384.0f;
+    float az_g = az / 16384.0f;
 
-    //  核心：瞬時能量
-    int acc = abs(ax - prev_ax) + abs(ay - prev_ay) + abs(az - prev_az);
+    // ===== magnitude =====
+    float mag = sqrtf(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
 
-    prev_ax = ax;
-    prev_ay = ay;
-    prev_az = az;
-    int gyro = abs(gx) + abs(gy) + abs(gz);
+    // ===== dynamic（去重力）=====
+    float dynamic = fabsf(mag - 1.0f);
 
-    //  去噪
-    if (acc < 300) acc = 0;
-    if (gyro < 200) gyro = 0;
+    // ===== energy（EMA）=====
+    energy = 0.8f * energy + 0.2f * dynamic;
 
-    int instant = acc + gyro / 4;
+    // ===== baseline（只在靜止時更新）=====
+    if (energy < 0.05f) {
+        baseline = 0.99f * baseline + 0.01f * energy;
+    }
 
-    // EMA
+    // ===== 自適應 threshold =====
+    float th_move   = baseline * 3.0f;
+    float th_active = baseline * 8.0f;
 
-    if (instant > activity)
-        activity = (activity * 8 + instant * 2) / 10;
-    else
-        activity = (activity * 5 + instant * 5) / 10;  // 快速下降
+    // ===== hysteresis（避免抖動）=====
+    switch (state) {
 
-    last_activity = activity;
+        case 0: // REST
+            if (energy > th_active)
+                state = 2;
+            else if (energy > th_move)
+                state = 1;
+            break;
 
-    //  hysteresis
-        if (activity > 600) {
-            active_count++;
-            static_count = 0;
-        } 
-        else if (activity < 200) {
-            static_count++;
-            active_count = 0;
-        }
+        case 1: // MOVE
+            if (energy > th_active)
+                state = 2;
+            else if (energy < th_move * 0.7f)
+                state = 0;
+            break;
 
-        // 狀態切換（防抖）
-        if (state == 0 && active_count > 5)
-            state = 1;
+        case 2: // ACTIVE
+            if (energy < th_move)
+                state = 0;
+            else if (energy < th_active * 0.7f)
+                state = 1;
+            break;
+    }
 
-        if (state == 1 && static_count > 10)
-            state = 0;
+    // ===== debug =====
+    printf("[IMU] dyn=%.3f E=%.3f base=%.3f | state=%d\n",
+        dynamic, energy, baseline, state);
 
-
-    return activity;
+    return state;
 }
 
 int mpu6050_get_state(void) {

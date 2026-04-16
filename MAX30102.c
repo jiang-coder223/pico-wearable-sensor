@@ -160,9 +160,9 @@ int max30102_get_bpm(void) {
 
 void max30102_hr_update(uint32_t red, uint32_t ir) {
 
-            static int dbg_count = 0;
+            /* static int dbg_count = 0;
             dbg_count++;
-            int print_now = (dbg_count % 50 == 0);
+            int print_now = (dbg_count % 50 == 0); */
 
     uint32_t diff = (red > prev_red) ? (red - prev_red) : (prev_red - red);
     prev_red = red;
@@ -190,9 +190,9 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
         return;
     }
 
-            if (print_now) {
+            /* if (print_now) {
                 printf("[RAW] red=%lu diff=%lu stable=%d\n", red, diff, stable_count);
-            }
+            } */
 
     // ===== DC removal =====
     if (lp == 0) lp = (float)red;
@@ -224,9 +224,9 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
 
     prev_hp = hp;
 
-    if (print_now) {
-        printf("[FILTER] ac=%.1f smooth=%.1f hp=%.1f\n", ac_val, smooth, hp);
-    }
+            /* if (print_now) {
+                printf("[FILTER] ac=%.1f smooth=%.1f hp=%.1f\n", ac_val, smooth, hp);
+            } */
 
     
     // ===== validity filter =====
@@ -275,9 +275,9 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
         // ===== confidence =====
         float confidence = max_corr / zero_corr;
 
-        if (print_now) {
-            printf("[LAG] best=%d conf=%.2f\n", best_lag, confidence);
-        }
+                /* if (print_now) {
+                    printf("[LAG] best=%d conf=%.2f\n", best_lag, confidence);
+                } */
 
         if (confidence < 0.35f) {
             goto skip;

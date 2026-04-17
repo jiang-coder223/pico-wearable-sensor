@@ -151,7 +151,7 @@ void SSD1306_draw_char(int x, int y, char c) {
     }
 }
 
-void display_update(int bpm, int spo2, int state, int trend) {
+void display_update(int bpm, int spo2, int state, int trend, int steps) {
     SSD1306_clear();
 
     char line1[20];
@@ -175,7 +175,7 @@ void display_update(int bpm, int spo2, int state, int trend) {
 
     snprintf(line1, sizeof(line1), "BPM: %d", bpm);
     snprintf(line2, sizeof(line2), "SPO2: %d%%", spo2);
-    snprintf(line3, sizeof(line3), "STATE: %s", state_str[state]);;
+    snprintf(line3, sizeof(line3), "ST:%s %d", state_str[state], steps);
     snprintf(line4, sizeof(line4), "TREND: %s", trend_str[trend]);
 
     SSD1306_draw_string(0, 0, line1);

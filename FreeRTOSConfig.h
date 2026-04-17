@@ -32,6 +32,7 @@
 #define INCLUDE_vTaskDelay        1
 #define INCLUDE_vTaskDelayUntil   1
 #define INCLUDE_vTaskDelete       1
+#define INCLUDE_uxTaskGetStackHighWaterMark 1
 
 #define configUSE_TIMERS 1
 #define configTIMER_TASK_PRIORITY 1

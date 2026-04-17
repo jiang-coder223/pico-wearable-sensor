@@ -51,6 +51,10 @@ static int peak_bpm = 0;
 static float peak_threshold = 50.0f;
 static float prev_hp_for_peak = 0;
 static int refractory = 0;
+static float hp = 0;
+static float prev_hp = 0;
+static float prev_smooth = 0;
+static int prev_has_signal = 0;
 
 
 // driver
@@ -92,20 +96,37 @@ void max30102_init(void) {
     printf("Init done\n");
 }
 
-void max30102_read_fifo(uint32_t *red, uint32_t *ir) {
+
+int max30102_read_fifo(uint32_t *red, uint32_t *ir) {
+
+    uint8_t wr = 0, rd = 0;
+
+    if (read_reg(MAX30102_FIFO_WR_PTR, &wr) < 0) return -1;
+    if (read_reg(MAX30102_FIFO_RD_PTR, &rd) < 0) return -1;
+
+    int available = (wr - rd) & 0x1F;
+
+    if (available <= 0) {
+        return 0;   // 沒資料
+    }
+
     uint8_t reg = MAX30102_FIFO_DATA;
     uint8_t data[6];
 
-    // 使用阻塞模式讀取 6 bytes (3 bytes Red + 3 bytes IR)
-    i2c_write_blocking(I2C0_PORT, MAX30102_ADDR, &reg, 1, true);
-    i2c_read_blocking(I2C0_PORT, MAX30102_ADDR, data, 6, false);
+    int ret = i2c_write_timeout_us(I2C0_PORT, MAX30102_ADDR, &reg, 1, true, 1000);
+    if (ret < 0) return -1;
 
-    // 數據解析 (將三個 8-bit 組合成一個 18-bit/24-bit 數值)
+    // ✅ 只讀一筆
+    ret = i2c_read_timeout_us(I2C0_PORT, MAX30102_ADDR, data, 6, false, 1000);
+    if (ret < 0) return -1;
+
     *red = ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
-    *red &= 0x03FFFF; // 屏蔽多餘位元
+    *red &= 0x03FFFF;
 
-    *ir = ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5];
-    *ir &= 0x03FFFF; 
+    *ir  = ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5];
+    *ir &= 0x03FFFF;
+
+    return 1;   // ✅ 固定回傳1
 }
 
 // config
@@ -152,6 +173,9 @@ void max30102_hr_init(void) {
     has_signal = 0;
     prev_red = 0;
     stable_count = 0;
+    hp = 0;
+    prev_hp = 0;
+    prev_smooth = 0;
 }
 
 int max30102_get_bpm(void) {
@@ -160,10 +184,7 @@ int max30102_get_bpm(void) {
 
 void max30102_hr_update(uint32_t red, uint32_t ir) {
 
-            /* static int dbg_count = 0;
-            dbg_count++;
-            int print_now = (dbg_count % 50 == 0); */
-
+    /* //差分演算法之後再補
     uint32_t diff = (red > prev_red) ? (red - prev_red) : (prev_red - red);
     prev_red = red;
 
@@ -175,7 +196,7 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
     if (diff < 2000) stable_count++;
     else stable_count = 0;
 
-    int valid = (stable_count >= 5 && diff < 8000);
+    int valid = (stable_count >= 5 && diff < 8000); */
 
     // ===== finger detect =====
     if (!has_signal) {
@@ -184,15 +205,17 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
         if (red < 4000) has_signal = 0;
     }
 
-    if (!has_signal) {
+    if (!has_signal && prev_has_signal) {
         max30102_hr_init();
-        averaged_bpm = 0;
+        max30102_spo2_init();
         return;
     }
 
-            /* if (print_now) {
-                printf("[RAW] red=%lu diff=%lu stable=%d\n", red, diff, stable_count);
-            } */
+    prev_has_signal = has_signal;
+
+    if (!has_signal) {
+        return;
+    }
 
     // ===== DC removal =====
     if (lp == 0) lp = (float)red;
@@ -202,16 +225,13 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
     float ac_val = ((float)red - lp) * 5.0f;
 
     if (fabs(ac_val) > 5000.0f) {
-        return;
+        ac_val = 0;
     }
 
     // ===== smoothing =====
     smooth = 0.4f * ac_val + 0.6f * smooth;
-
-    static float hp = 0;
-    static float prev_hp = 0;
-
-    hp = smooth - 0.8f * hp;
+    hp = 0.8f * (hp + smooth - prev_smooth);
+    prev_smooth = smooth;
 
     // ===== spike limiter（限制最大幅度）=====
     if (hp > 1000.0f) hp = 1000.0f;
@@ -223,11 +243,6 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
     }
 
     prev_hp = hp;
-
-            /* if (print_now) {
-                printf("[FILTER] ac=%.1f smooth=%.1f hp=%.1f\n", ac_val, smooth, hp);
-            } */
-
     
     // ===== validity filter =====
     if (fabs(hp) > 700.0f) {
@@ -274,10 +289,6 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
 
         // ===== confidence =====
         float confidence = max_corr / zero_corr;
-
-                /* if (print_now) {
-                    printf("[LAG] best=%d conf=%.2f\n", best_lag, confidence);
-                } */
 
         if (confidence < 0.35f) {
             goto skip;
@@ -480,6 +491,7 @@ void max30102_spo2_update(uint32_t red, uint32_t ir)
         spo2_value = spo2;
     else
         spo2_value = 0.6f * spo2_value + 0.4f * spo2;
+
 }
 
 int max30102_get_spo2(void) {

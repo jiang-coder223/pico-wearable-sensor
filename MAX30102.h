@@ -24,7 +24,7 @@ void max30102_init(void);
 void max30102_setup(void);
 
 // --- driver ---
-void max30102_read_fifo(uint32_t *red, uint32_t *ir);
+int max30102_read_fifo(uint32_t *red, uint32_t *ir);
 
 // --- Heart Rate ---
 void max30102_hr_init(void);

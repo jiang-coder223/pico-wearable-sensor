@@ -126,62 +126,54 @@ int mpu6050_get_state(void){
     return state;
 }
 
-void mpu6050_activity_update(void) {
-
+void mpu6050_activity_update(void)
+{
     static float energy = 0.0f;
-    static float baseline = 0.02f;   // 初始靜止噪聲
+    static float baseline = 0.02f;
 
     float ax_g = g_ax;
     float ay_g = g_ay;
     float az_g = g_az;
 
-    // ===== magnitude =====
     float mag = sqrtf(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
+    static float gravity = 1.0f;
 
-    // ===== dynamic（去重力）=====
-    float dynamic = fabsf(mag - 1.0f);
+    // 慢速追蹤重力（時間常數約 1~2 秒）
+    gravity = 0.995f * gravity + 0.005f * mag;
 
-    // ===== energy（EMA）=====
+    float dynamic = fabsf(mag - gravity);
+
     energy = 0.8f * energy + 0.2f * dynamic;
 
-    // ===== baseline（只在靜止時更新）=====
     if (energy < 0.05f) {
         baseline = 0.99f * baseline + 0.01f * energy;
     }
 
-    // ===== 自適應 threshold =====
     float th_move   = baseline * 3.0f;
     float th_active = baseline * 8.0f;
 
-    // ===== hysteresis（避免抖動）=====
     switch (state) {
-
-        case 0: // REST
-            if (energy > th_active)
-                state = 2;
-            else if (energy > th_move)
-                state = 1;
+        case 0:
+            if (energy > th_active) state = 2;
+            else if (energy > th_move) state = 1;
             break;
 
-        case 1: // MOVE
-            if (energy > th_active)
-                state = 2;
-            else if (energy < th_move * 0.7f)
-                state = 0;
+        case 1:
+            if (energy > th_active) state = 2;
+            else if (energy < th_move * 0.7f) state = 0;
             break;
 
-        case 2: // ACTIVE
-            if (energy < th_move)
-                state = 0;
-            else if (energy < th_active * 0.7f)
-                state = 1;
+        case 2:
+            if (energy < th_move) state = 0;
+            else if (energy < th_active * 0.7f) state = 1;
             break;
     }
 
-    // ===== debug =====
-    /* printf("[IMU] dyn=%.3f E=%.3f base=%.3f | state=%d\n",
-        dynamic, energy, baseline, state);
- */
+    static int dbg_count = 0;
+
+    if (++dbg_count >= 20) {   // 每 200ms 印一次
+        dbg_count = 0;
+    }
 }
 
 static float hpf_alpha(float fc) {

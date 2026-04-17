@@ -106,6 +106,8 @@ void DisplayTask(void *param)
     sensor_data_t data;
     int bpm = 0, spo2 = 0;
     int trend = 0;
+    int state = 0;
+    int steps = 0;
 
     while (1)
     {
@@ -113,11 +115,13 @@ void DisplayTask(void *param)
             bpm   = data.bpm;
             spo2  = data.spo2;
             trend = data.hr_trend;
+            state = data.state;    
+            steps = data.steps; 
         }
 
         xSemaphoreTake(i2cMutex, portMAX_DELAY);
 
-        display_update(bpm, spo2, 0, trend, 0);
+        display_update(bpm, spo2, state, trend, steps);
 
         xSemaphoreGive(i2cMutex);
 
@@ -195,40 +199,54 @@ void ProcessTask(void *param)
     sample_t s;
     sensor_data_t data = {0};
 
-    int prev_bpm = -1;
+    TickType_t lastWake = xTaskGetTickCount();
+
+    static int prev_bpm = -1;
+    static int current_trend = HR_STABLE;
 
     while (1)
     {
-        if (xQueueReceive(sampleQueue, &s, portMAX_DELAY))
+        // ✅ 固定 100Hz（關鍵）
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(10));
+
+        // ===== HR（有資料才更新）=====
+        if (xQueueReceive(sampleQueue, &s, 0))
         {
             max30102_hr_update(s.red, s.ir);
             max30102_spo2_update(s.red, s.ir);
 
-            static int prev_bpm = -1;
-            static int current_trend = HR_STABLE;
-
             int bpm  = max30102_get_bpm();
             int spo2 = max30102_get_spo2();
 
-            if (prev_bpm == -1) {
-                prev_bpm = bpm;
-            }
+            if (prev_bpm == -1) prev_bpm = bpm;
 
-            if (bpm != prev_bpm) {
+            if (bpm != prev_bpm)
                 current_trend = calc_hr_trend(bpm, prev_bpm);
+
+            prev_bpm = bpm;
+
+            // ===== IMU =====
+            if (xSemaphoreTake(i2cMutex, 0)) {
+                mpu6050_update();
+                xSemaphoreGive(i2cMutex);
             }
 
-            data.hr_trend = current_trend;
-            prev_bpm = bpm;
+            mpu6050_activity_update();
+            mpu6050_step_counter_update();
+
+            data.state = mpu6050_get_state();
+            data.steps = mpu6050_get_steps();
 
             data.red  = s.red;
             data.ir   = s.ir;
             data.bpm  = bpm;
             data.spo2 = spo2;
-
-            xQueueOverwrite(sensorQueue, &data);
-            xQueueOverwrite(mqttQueue, &data);
+            data.hr_trend = current_trend;
         }
+
+        // ===== output =====
+        xQueueOverwrite(sensorQueue, &data);
+        xQueueOverwrite(mqttQueue, &data);
     }
 }
 

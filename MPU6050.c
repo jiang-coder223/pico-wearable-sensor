@@ -4,6 +4,26 @@
 #include "global_defines.h"
 #include "math.h"
 
+#define FS_HZ              100.0f
+
+#define HPF_CUTOFF_HZ      0.5f
+#define LPF_CUTOFF_HZ      3.0f
+
+#define INIT_THRESHOLD     0.12f
+#define TH_FACTOR          1.5f
+
+#define MIN_STEP_MS        300
+#define MAX_STEP_MS        2000
+
+typedef struct {
+    float y;
+    float x_prev;
+} HPF;
+
+typedef struct {
+    float y;
+} LPF;
+
 static int last_activity = 0;
 static int state = 0;
 static int16_t prev_ax = 0, prev_ay = 0, prev_az = 0;
@@ -35,6 +55,29 @@ void mpu6050_read_gyro(int16_t *gx, int16_t *gy, int16_t *gz) {
     *gx = (int16_t)((buf[0] << 8) | buf[1]);
     *gy = (int16_t)((buf[2] << 8) | buf[3]);
     *gz = (int16_t)((buf[4] << 8) | buf[5]);
+}
+
+static float hpf_alpha(float fc) {
+    float dt = 1.0f / FS_HZ;
+    float RC = 1.0f / (2.0f * 3.1415926f * fc);
+    return RC / (RC + dt);
+}
+
+static float lpf_alpha(float fc) {
+    float dt = 1.0f / FS_HZ;
+    float RC = 1.0f / (2.0f * 3.1415926f * fc);
+    return dt / (RC + dt);
+}
+
+static float hpf_update(HPF *f, float x, float a) {
+    f->y = a * (f->y + x - f->x_prev);
+    f->x_prev = x;
+    return f->y;
+}
+
+static float lpf_update(LPF *f, float x, float a) {
+    f->y = f->y + a * (x - f->y);
+    return f->y;
 }
 
 void mpu6050_calibrate(void) {
@@ -138,3 +181,60 @@ int mpu6050_get_activity_step(void) {
     return state;
 }
 
+int step_counter_update(float ax, float ay, float az) {
+
+    // ---- static state ----
+    static HPF hpf = {0};
+    static LPF lpf = {0};
+    static float a_hpf_a = 0, a_lpf_a = 0;
+    static int init = 0;
+
+    static float prev = 0, prev2 = 0;
+    static float threshold = INIT_THRESHOLD;
+
+    static uint32_t last_step_ms = 0;
+    static int steps = 0;
+
+    static float mean = 0, var = 0;   // for adaptive threshold
+
+    // ---- init ----
+    if (!init) {
+        a_hpf_a = hpf_alpha(HPF_CUTOFF_HZ);
+        a_lpf_a = lpf_alpha(LPF_CUTOFF_HZ);
+        init = 1;
+    }
+
+    // ---- magnitude ----
+    float mag = sqrtf(ax*ax + ay*ay + az*az);
+
+    // ---- band-pass ----
+    float x = hpf_update(&hpf, mag, a_hpf_a);
+    x = lpf_update(&lpf, x, a_lpf_a);
+
+    // ---- 更新統計（rolling）----
+    mean = 0.99f * mean + 0.01f * x;
+    float diff = x - mean;
+    var = 0.99f * var + 0.01f * diff * diff;
+    float std = sqrtf(var);
+
+    // ---- adaptive threshold ----
+    threshold = fmaxf(INIT_THRESHOLD, mean + TH_FACTOR * std);
+
+    // ---- peak detection ----
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (prev > prev2 && prev > x && prev > threshold) {
+
+        uint32_t dt = now - last_step_ms;
+
+        if (dt > MIN_STEP_MS && dt < MAX_STEP_MS) {
+            steps++;
+            last_step_ms = now;
+        }
+    }
+
+    prev2 = prev;
+    prev = x;
+
+    return steps;
+}

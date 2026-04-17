@@ -4,9 +4,6 @@
 // I2C address
 #define SSD1306_ADDR 0x3C
 
-// register
-
-
 extern uint8_t buffer[1024];
 
 // function

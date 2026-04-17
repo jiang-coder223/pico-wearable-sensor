@@ -46,7 +46,7 @@ hr_trend_t calc_hr_trend(int current, int prev);
 int main() {
 
     stdio_init_all();
-    while (!stdio_usb_connected()) { sleep_ms(100); }
+    /* while (!stdio_usb_connected()) { sleep_ms(100); } */
     sleep_ms(500);
 
     printf("Start RTOS System\n");

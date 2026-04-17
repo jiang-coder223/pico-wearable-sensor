@@ -11,6 +11,7 @@
 #define MPU6050_REG_ACCEL_XOUT_H 0x3B
 #define MPU6050_REG_GYRO_XOUT_H  0x43
 
+
 // 外部變數宣告，讓 main.c 可以存取
 extern int32_t ax_offset, ay_offset, az_offset;
 extern int32_t gx_offset, gy_offset, gz_offset;
@@ -21,5 +22,6 @@ void mpu6050_read_accel(int16_t *ax, int16_t *ay, int16_t *az);
 void mpu6050_read_gyro(int16_t *gx, int16_t *gy, int16_t *gz);
 void mpu6050_calibrate(void);
 int mpu6050_get_activity_step(void);
+int step_counter_update(float ax, float ay, float az);
 
 #endif

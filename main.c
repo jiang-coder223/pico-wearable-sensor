@@ -30,6 +30,12 @@ typedef struct {
     int spo2;
     int state;
     int hr_trend;
+
+     // Debug
+    float step_signal;
+    float step_threshold;
+    uint32_t step_dt;
+    int steps;
 } sensor_data_t;
 
 typedef enum {
@@ -119,12 +125,19 @@ void SensorTask(void *param) {
         max30102_read_fifo(&data.red, &data.ir);
         xSemaphoreGive(i2cMutex);
 
+        xSemaphoreTake(i2cMutex, portMAX_DELAY);
+        mpu6050_update();
+        xSemaphoreGive(i2cMutex);
+
         max30102_hr_update(data.red, data.ir);
         max30102_spo2_update(data.red, data.ir);
+        mpu6050_activity_update();
+        mpu6050_step_counter_update();
         
         data.bpm  = max30102_get_bpm();
         data.spo2 = max30102_get_spo2();
-        data.state = mpu6050_get_activity_step();
+        data.state = mpu6050_get_state();
+        data.steps = mpu6050_get_steps();
 
         static int last_print = 0;
 

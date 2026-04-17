@@ -24,9 +24,10 @@ typedef struct {
     float y;
 } LPF;
 
-static int last_activity = 0;
 static int state = 0;
-static int16_t prev_ax = 0, prev_ay = 0, prev_az = 0;
+static int steps = 0;
+static float g_ax, g_ay, g_az;
+static float g_gx, g_gy, g_gz;
 
 // 定義變數實體
 int32_t ax_offset = 0, ay_offset = 0, az_offset = 0;
@@ -35,6 +36,33 @@ int32_t gx_offset = 0, gy_offset = 0, gz_offset = 0;
 void mpu6050_init(void) {
     uint8_t buf[] = {MPU6050_REG_PWR_MGMT_1, 0x00};
     i2c_write_blocking(I2C0_PORT, MPU6050_ADDR, buf, 2, false);
+}
+
+void mpu6050_update(void) {
+
+    int16_t ax, ay, az;
+    int16_t gx, gy, gz;
+
+    mpu6050_read_accel(&ax, &ay, &az);
+    mpu6050_read_gyro(&gx, &gy, &gz);
+
+    // accel 校正
+    ax -= ax_offset;
+    ay -= ay_offset;
+    az -= az_offset;
+
+    // gyro 校正
+    gx -= gx_offset;
+    gy -= gy_offset;
+    gz -= gz_offset;
+
+    g_ax = ax / 16384.0f;
+    g_ay = ay / 16384.0f;
+    g_az = az / 16384.0f;
+
+    g_gx = gx / 131.0f;   // deg/s（±250dps）
+    g_gy = gy / 131.0f;
+    g_gz = gz / 131.0f;
 }
 
 void mpu6050_read_accel(int16_t *ax, int16_t *ay, int16_t *az) {
@@ -55,29 +83,6 @@ void mpu6050_read_gyro(int16_t *gx, int16_t *gy, int16_t *gz) {
     *gx = (int16_t)((buf[0] << 8) | buf[1]);
     *gy = (int16_t)((buf[2] << 8) | buf[3]);
     *gz = (int16_t)((buf[4] << 8) | buf[5]);
-}
-
-static float hpf_alpha(float fc) {
-    float dt = 1.0f / FS_HZ;
-    float RC = 1.0f / (2.0f * 3.1415926f * fc);
-    return RC / (RC + dt);
-}
-
-static float lpf_alpha(float fc) {
-    float dt = 1.0f / FS_HZ;
-    float RC = 1.0f / (2.0f * 3.1415926f * fc);
-    return dt / (RC + dt);
-}
-
-static float hpf_update(HPF *f, float x, float a) {
-    f->y = a * (f->y + x - f->x_prev);
-    f->x_prev = x;
-    return f->y;
-}
-
-static float lpf_update(LPF *f, float x, float a) {
-    f->y = f->y + a * (x - f->y);
-    return f->y;
 }
 
 void mpu6050_calibrate(void) {
@@ -117,19 +122,18 @@ void mpu6050_calibrate(void) {
     printf("Calibrate Done!\n"); */
 }
 
-int mpu6050_get_activity_step(void) {
+int mpu6050_get_state(void){
+    return state;
+}
+
+void mpu6050_activity_update(void) {
 
     static float energy = 0.0f;
     static float baseline = 0.02f;   // 初始靜止噪聲
-    static int state = 0;            // 0=REST,1=MOVE,2=ACTIVE
 
-    int16_t ax, ay, az;
-    mpu6050_read_accel(&ax, &ay, &az);
-
-    // ===== normalize =====
-    float ax_g = ax / 16384.0f;
-    float ay_g = ay / 16384.0f;
-    float az_g = az / 16384.0f;
+    float ax_g = g_ax;
+    float ay_g = g_ay;
+    float az_g = g_az;
 
     // ===== magnitude =====
     float mag = sqrtf(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
@@ -178,10 +182,35 @@ int mpu6050_get_activity_step(void) {
     /* printf("[IMU] dyn=%.3f E=%.3f base=%.3f | state=%d\n",
         dynamic, energy, baseline, state);
  */
-    return state;
 }
 
-int step_counter_update(float ax, float ay, float az) {
+static float hpf_alpha(float fc) {
+    float dt = 1.0f / FS_HZ;
+    float RC = 1.0f / (2.0f * 3.1415926f * fc);
+    return RC / (RC + dt);
+}
+
+static float lpf_alpha(float fc) {
+    float dt = 1.0f / FS_HZ;
+    float RC = 1.0f / (2.0f * 3.1415926f * fc);
+    return dt / (RC + dt);
+}
+
+static float hpf_update(HPF *f, float x, float a) {
+    f->y = a * (f->y + x - f->x_prev);
+    f->x_prev = x;
+    return f->y;
+}
+
+static float lpf_update(LPF *f, float x, float a) {
+    f->y = f->y + a * (x - f->y);
+    return f->y;
+}
+
+int mpu6050_get_steps(void){
+    return steps;
+}
+void mpu6050_step_counter_update(void) {
 
     // ---- static state ----
     static HPF hpf = {0};
@@ -193,7 +222,6 @@ int step_counter_update(float ax, float ay, float az) {
     static float threshold = INIT_THRESHOLD;
 
     static uint32_t last_step_ms = 0;
-    static int steps = 0;
 
     static float mean = 0, var = 0;   // for adaptive threshold
 
@@ -205,7 +233,7 @@ int step_counter_update(float ax, float ay, float az) {
     }
 
     // ---- magnitude ----
-    float mag = sqrtf(ax*ax + ay*ay + az*az);
+    float mag = sqrtf(g_ax*g_ax + g_ay*g_ay + g_az*g_az);
 
     // ---- band-pass ----
     float x = hpf_update(&hpf, mag, a_hpf_a);
@@ -235,6 +263,4 @@ int step_counter_update(float ax, float ay, float az) {
 
     prev2 = prev;
     prev = x;
-
-    return steps;
 }

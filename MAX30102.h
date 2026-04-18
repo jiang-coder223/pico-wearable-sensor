@@ -40,4 +40,5 @@ int max30102_get_spo2(void);
 float max30102_get_R(void);
 float max30102_get_ratio_r(void);
 float max30102_get_ratio_i(void);
+int max30102_has_signal(void);
 #endif

@@ -109,6 +109,7 @@ void DisplayTask(void *param)
     int state = 0;
     int steps = 0;
 
+
     while (1)
     {
         if (xQueueReceive(sensorQueue, &data, 0)) {
@@ -206,10 +207,25 @@ void ProcessTask(void *param)
 
     while (1)
     {
-        // ✅ 固定 100Hz（關鍵）
+        // ✅ 固定 100Hz（核心）
         vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(10));
 
-        // ===== HR（有資料才更新）=====
+        // =====================================================
+        // 🔴 1. IMU（永遠跑，不管 HR）
+        // =====================================================
+        xSemaphoreTake(i2cMutex, portMAX_DELAY);   // 🔴 一定要拿到
+        mpu6050_update();
+        xSemaphoreGive(i2cMutex);
+
+        mpu6050_activity_update();
+        mpu6050_step_counter_update();
+
+        data.state = mpu6050_get_state();
+        data.steps = mpu6050_get_steps();
+
+        // =====================================================
+        // 🔴 2. HR（有資料才更新）
+        // =====================================================
         if (xQueueReceive(sampleQueue, &s, 0))
         {
             max30102_hr_update(s.red, s.ir);
@@ -218,24 +234,17 @@ void ProcessTask(void *param)
             int bpm  = max30102_get_bpm();
             int spo2 = max30102_get_spo2();
 
-            if (prev_bpm == -1) prev_bpm = bpm;
+            if (!max30102_has_signal()) {
+                prev_bpm = -1;
+                current_trend = HR_STABLE;
+            } else {
+                if (prev_bpm == -1) prev_bpm = bpm;
 
-            if (bpm != prev_bpm)
-                current_trend = calc_hr_trend(bpm, prev_bpm);
+                if (bpm != prev_bpm)
+                    current_trend = calc_hr_trend(bpm, prev_bpm);
 
-            prev_bpm = bpm;
-
-            // ===== IMU =====
-            if (xSemaphoreTake(i2cMutex, 0)) {
-                mpu6050_update();
-                xSemaphoreGive(i2cMutex);
+                prev_bpm = bpm;
             }
-
-            mpu6050_activity_update();
-            mpu6050_step_counter_update();
-
-            data.state = mpu6050_get_state();
-            data.steps = mpu6050_get_steps();
 
             data.red  = s.red;
             data.ir   = s.ir;
@@ -244,7 +253,9 @@ void ProcessTask(void *param)
             data.hr_trend = current_trend;
         }
 
-        // ===== output =====
+        // =====================================================
+        // 🔴 3. output（固定節奏）
+        // =====================================================
         xQueueOverwrite(sensorQueue, &data);
         xQueueOverwrite(mqttQueue, &data);
     }

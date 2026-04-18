@@ -55,6 +55,7 @@ static float hp = 0;
 static float prev_hp = 0;
 static float prev_smooth = 0;
 static int prev_has_signal = 0;
+static int spo2_init_count = 0;
 
 
 // driver
@@ -176,6 +177,13 @@ void max30102_hr_init(void) {
     hp = 0;
     prev_hp = 0;
     prev_smooth = 0;
+    bad_count = 0;        
+    last_best_lag = 0;     
+    last_confidence = 0;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        data_buffer[i] = 0;
+    }
 }
 
 int max30102_get_bpm(void) {
@@ -386,13 +394,37 @@ float max30102_get_confidence(void) {
 void max30102_spo2_init(void) {
     dc_red = 0;
     dc_ir  = 0;
+
     spo2_idx = 0;
     spo2_value = 0;
+
+    last_R = 0;
+    g_R = 0;
+    g_ratio_r = 0;
+    g_ratio_i = 0;
+
+    reject_count = 0;
+    R_idx = 0;
+
+    spo2_init_count = 0;
+
+    //  buffer 清空
+    for (int i = 0; i < SPO2_BUF; i++) {
+        red_buf[i] = 0;
+        ir_buf[i]  = 0;
+    }
+
+    // R history 清空
+    for (int i = 0; i < 5; i++) {
+        R_history[i] = 0;
+    }
+
+    // DC 初始化狀態
+    // （會重新 warm-up）
 }
 
 void max30102_spo2_update(uint32_t red, uint32_t ir)
 {
-    static int init_count = 0;
 
     // ===== 初始化 =====
     if (init_count < 50) {
@@ -473,7 +505,6 @@ void max30102_spo2_update(uint32_t red, uint32_t ir)
     if (R < 0.3f || R > 0.9f) return;
 
     g_R = R;
-    static float last_R = 0;
 
     if (last_R != 0 && fabs(R - last_R) > 0.1f) {
         return;
@@ -508,4 +539,8 @@ float max30102_get_ratio_r(void) {
 
 float max30102_get_ratio_i(void) {
     return g_ratio_i;
+}
+
+int max30102_has_signal(void) {
+    return has_signal;
 }

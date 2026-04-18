@@ -6,14 +6,15 @@
 
 #define FS_HZ              100.0f
 
-#define HPF_CUTOFF_HZ      0.5f
-#define LPF_CUTOFF_HZ      3.0f
+#define HPF_CUTOFF_HZ      0.3f
+#define LPF_CUTOFF_HZ      5.0f
 
-#define INIT_THRESHOLD     0.12f
-#define TH_FACTOR          1.5f
+#define INIT_THRESHOLD     0.02f
+#define TH_FACTOR          1.2f
 
 #define MIN_STEP_MS        300
 #define MAX_STEP_MS        2000
+#define REFRACTORY_MS      300
 
 typedef struct {
     float y;
@@ -202,57 +203,117 @@ static float lpf_update(LPF *f, float x, float a) {
 int mpu6050_get_steps(void){
     return steps;
 }
-void mpu6050_step_counter_update(void) {
-
-    // ---- static state ----
+void mpu6050_step_counter_update(void)
+{
     static HPF hpf = {0};
     static LPF lpf = {0};
     static float a_hpf_a = 0, a_lpf_a = 0;
     static int init = 0;
 
-    static float prev = 0, prev2 = 0;
+    static float prev = 0;
     static float threshold = INIT_THRESHOLD;
 
     static uint32_t last_step_ms = 0;
+    static int initialized = 0;
 
-    static float mean = 0, var = 0;   // for adaptive threshold
+    static float mean = 0, var = 0;
+    static int passed_negative = 1;
 
-    // ---- init ----
+    // 🔴 gyro event（時間窗口）
+    static uint32_t last_gyro_peak_ms = 0;
+
     if (!init) {
-        a_hpf_a = hpf_alpha(HPF_CUTOFF_HZ);
-        a_lpf_a = lpf_alpha(LPF_CUTOFF_HZ);
+        a_hpf_a = hpf_alpha(0.7f);
+        a_lpf_a = lpf_alpha(3.0f);
         init = 1;
     }
 
-    // ---- magnitude ----
+    // =========================================================
+    // 🔴 1. accel 處理
+    // =========================================================
     float mag = sqrtf(g_ax*g_ax + g_ay*g_ay + g_az*g_az);
 
-    // ---- band-pass ----
-    float x = hpf_update(&hpf, mag, a_hpf_a);
+    static float gravity = 1.0f;
+    gravity = 0.98f * gravity + 0.02f * mag;
+
+    float dynamic = mag - gravity;
+
+    float x = hpf_update(&hpf, dynamic, a_hpf_a);
     x = lpf_update(&lpf, x, a_lpf_a);
 
-    // ---- 更新統計（rolling）----
-    mean = 0.99f * mean + 0.01f * x;
-    float diff = x - mean;
-    var = 0.99f * var + 0.01f * diff * diff;
-    float std = sqrtf(var);
-
-    // ---- adaptive threshold ----
-    threshold = fmaxf(INIT_THRESHOLD, mean + TH_FACTOR * std);
-
-    // ---- peak detection ----
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-
-    if (prev > prev2 && prev > x && prev > threshold) {
-
-        uint32_t dt = now - last_step_ms;
-
-        if (dt > MIN_STEP_MS && dt < MAX_STEP_MS) {
-            steps++;
-            last_step_ms = now;
-        }
+    // baseline
+    if (fabs(x) < threshold * 0.5f) {
+        mean = 0.995f * mean + 0.005f * x;
+        float diff = x - mean;
+        var = 0.995f * var + 0.005f * diff * diff;
     }
 
-    prev2 = prev;
+    float std = sqrtf(var);
+    if (std < 0.02f) std = 0.02f;
+
+    threshold = fmaxf(INIT_THRESHOLD, mean + 2.5f * std);
+    if (threshold > 0.25f) threshold = 0.25f;
+
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    uint32_t dt  = now - last_step_ms;
+
+    // =========================================================
+    // 🔴 2. gyro peak（只記時間，不做同步判斷）
+    // =========================================================
+    float gyro_mag = sqrtf(g_gx*g_gx + g_gy*g_gy + g_gz*g_gz);
+
+    if (gyro_mag > 120.0f) {
+        last_gyro_peak_ms = now;
+    }
+
+    // =========================================================
+    // 🔴 3. accel peak
+    // =========================================================
+    int accel_valid = 0;
+
+    if (prev > threshold && prev > x && passed_negative) {
+        if (prev > threshold * 2.0f)
+            accel_valid = 1;
+    }
+
+    // =========================================================
+    // 🔴 4. 融合（時間窗口配對）
+    // =========================================================
+    if (accel_valid && (now - last_gyro_peak_ms < 300)) {
+
+        if (!initialized) {
+            last_step_ms = now;
+            initialized = 1;
+            goto update_state;
+        }
+
+        // 節奏限制
+        if (dt < 250) goto update_state;
+
+        if (dt > 1500) {
+            last_step_ms = now;
+            goto update_state;
+        }
+
+        // ✅ 計步
+        steps++;
+        last_step_ms = now;
+        passed_negative = 0;
+    }
+
+update_state:
+
+    // 🔴 解鎖
+    if (x < -threshold * 0.3f)
+        passed_negative = 1;
+
     prev = x;
+
+    // debug
+/*     static int dbg = 0;
+    if (++dbg >= 10) {
+        dbg = 0;
+        printf("[STEP] x=%.3f th=%.3f gyro=%.1f steps=%d\n",
+               x, threshold, gyro_mag, steps);
+    } */
 }

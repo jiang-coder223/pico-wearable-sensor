@@ -151,7 +151,7 @@ void SSD1306_draw_char(int x, int y, char c) {
     }
 }
 
-void display_update(int bpm, int spo2, int state, int trend, int steps) {
+void display_update(int bpm, int spo2, int state, int trend, int steps, int battery) {
     SSD1306_clear();
 
     char line1[20];
@@ -183,6 +183,11 @@ void display_update(int bpm, int spo2, int state, int trend, int steps) {
     SSD1306_draw_string(0, 32, line3);
     SSD1306_draw_string(0, 48, line4);
 
+    char bat_str[8];
+    snprintf(bat_str, sizeof(bat_str), "%d%%", battery);
+    SSD1306_draw_string(100, 0, bat_str);
+    SSD1306_draw_battery(100, 10, battery);
+    
     SSD1306_update();
 }
 
@@ -191,5 +196,36 @@ void SSD1306_draw_string(int x, int y, const char *str) {
         SSD1306_draw_char(x, y, *str);
         x += 6;  // 字距
         str++;
+    }
+}
+
+void SSD1306_draw_battery(int x, int y, int percent) {
+
+    int width = 18;
+    int height = 8;
+
+    // 外框
+    for (int i = 0; i < width; i++) {
+        SSD1306_draw_pixel(x + i, y, 1);
+        SSD1306_draw_pixel(x + i, y + height - 1, 1);
+    }
+    for (int i = 0; i < height; i++) {
+        SSD1306_draw_pixel(x, y + i, 1);
+        SSD1306_draw_pixel(x + width - 1, y + i, 1);
+    }
+
+    // 電池頭
+    SSD1306_draw_pixel(x + width, y + 2, 1);
+    SSD1306_draw_pixel(x + width, y + 3, 1);
+    SSD1306_draw_pixel(x + width, y + 4, 1);
+    SSD1306_draw_pixel(x + width, y + 5, 1);
+
+    // 填充
+    int fill = (percent * (width - 4)) / 100;
+
+    for (int i = 0; i < fill; i++) {
+        for (int j = 2; j < height - 2; j++) {
+            SSD1306_draw_pixel(x + 2 + i, y + j, 1);
+        }
     }
 }

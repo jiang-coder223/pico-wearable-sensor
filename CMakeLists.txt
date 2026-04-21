@@ -38,19 +38,21 @@ add_executable(main
     MAX30102.c
     MQTT.c
     SSD1306.c
+    bettery.c
 )
 
 pico_set_program_name(main "main")
 pico_set_program_version(main "0.1")
 
 # 輸出設定：關閉 UART，開啟 USB (Serial Monitor 才能看)
-pico_enable_stdio_uart(main 0)
-pico_enable_stdio_usb(main 1)
+pico_enable_stdio_uart(main 1)
+pico_enable_stdio_usb(main 0)
 
 # --- 連結庫設定 ---
 target_link_libraries(main 
     pico_stdlib 
     hardware_i2c
+    hardware_adc
     pico_cyw43_arch_lwip_threadsafe_background
     pico_lwip_mqtt
 )

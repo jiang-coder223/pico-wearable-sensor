@@ -1,8 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
 #include "pico/stdlib.h"
+#include <math.h>
 #include "hardware/i2c.h"
+#include "hardware/adc.h"
 #include "MPU6050.h"
 #include "MAX30102.h"
 #include "SSD1306.h"
@@ -12,6 +13,9 @@
 #include "task.h"
 #include "queue.h"
 #include "semphr.h"
+#include "bettery.h"
+
+
 
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
@@ -20,6 +24,7 @@
 #define DEBUG_ALL 0
 
 QueueHandle_t sensorQueue;
+QueueHandle_t batteryQueue;
 QueueHandle_t mqttQueue;
 QueueHandle_t sampleQueue;
 SemaphoreHandle_t i2cMutex;
@@ -33,7 +38,14 @@ typedef struct {
     int state;
     int hr_trend;
     int steps;
+    float battery_v;   
+    int   battery_p;
 } sensor_data_t;
+
+typedef struct {
+    float v;
+    int p;
+} battery_data_t;
 
 typedef struct {
     uint32_t red;
@@ -51,55 +63,58 @@ void DisplayTask(void *param);
 void NetworkTask(void *param);
 void ReadTask(void *param);
 void ProcessTask(void *param);
+void BatteryTask(void *param);
 hr_trend_t calc_hr_trend(int current, int prev);
 
-int main() {
+    int main() {
 
-    stdio_init_all();
-    /* while (!stdio_usb_connected()) { sleep_ms(100); } */
-    sleep_ms(500);
+        stdio_init_all();
+        sleep_ms(500);
 
-    printf("Start RTOS System\n");
+        printf("Start RTOS System\n");
 
-    // I2C init
-    i2c_init(I2C0_PORT, 400 * 1000);
-    gpio_set_function(I2C0_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(I2C0_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C0_SDA);
-    gpio_pull_up(I2C0_SCL);
-    
-    //解決資源互搶問題
-    i2cMutex = xSemaphoreCreateMutex();
+        // I2C init
+        i2c_init(I2C0_PORT, 400 * 1000);
+        gpio_set_function(I2C0_SDA, GPIO_FUNC_I2C);
+        gpio_set_function(I2C0_SCL, GPIO_FUNC_I2C);
+        gpio_pull_up(I2C0_SDA);
+        gpio_pull_up(I2C0_SCL);
+        
+        //解決資源互搶問題
+        i2cMutex = xSemaphoreCreateMutex();
 
-    max30102_init();
-    max30102_setup();
-    max30102_hr_init();
-    max30102_spo2_init();
+        max30102_init();
+        max30102_setup();
+        max30102_hr_init();
+        max30102_spo2_init();
 
-    SSD1306_init();
-    SSD1306_clear();
+        SSD1306_init();
+        SSD1306_clear();
 
-    mpu6050_init();
-    mpu6050_calibrate();
+        mpu6050_init();
+        mpu6050_calibrate();
 
-    printf("ALL INIT DONE\n");
+        printf("ALL INIT DONE\n");
 
-    // 建 queue
-    sensorQueue = xQueueCreate(1, sizeof(sensor_data_t));
-    mqttQueue = xQueueCreate(1, sizeof(sensor_data_t));
-    sampleQueue = xQueueCreate(128, sizeof(sample_t));
+        // 建 queue
+        sensorQueue = xQueueCreate(1, sizeof(sensor_data_t));
+        batteryQueue = xQueueCreate(1, sizeof(battery_data_t));
+        mqttQueue = xQueueCreate(1, sizeof(sensor_data_t));
+        sampleQueue = xQueueCreate(128, sizeof(sample_t));
 
-    // 建 task
-    xTaskCreate(ReadTask,    "read",    1024, NULL, 2, NULL);
-    xTaskCreate(ProcessTask, "proc",    2048, NULL, 3, NULL);
-    xTaskCreate(NetworkTask, "NET",     2048, NULL, 1, NULL);
-    xTaskCreate(DisplayTask, "Display", 512, NULL, 1, NULL);
+        // 建 task
+        xTaskCreate(ReadTask,    "read",    1024, NULL, 2, NULL);
+        xTaskCreate(ProcessTask, "proc",    2048, NULL, 3, NULL);
+        /* xTaskCreate(NetworkTask, "NET",     2048, NULL, 1, NULL); */
+        xTaskCreate(DisplayTask, "Display", 512, NULL, 1, NULL);
+        xTaskCreate(BatteryTask, "BAT", 1024, NULL, 1, NULL);
 
-    // 啟動 RTOS
-    vTaskStartScheduler();
+        // 啟動 RTOS
+        vTaskStartScheduler();
 
-    while (1); 
-}
+        while (1); 
+    }
+
 
 void DisplayTask(void *param)
 {
@@ -108,6 +123,7 @@ void DisplayTask(void *param)
     int trend = 0;
     int state = 0;
     int steps = 0;
+    int battery = 0;
 
 
     while (1)
@@ -118,11 +134,12 @@ void DisplayTask(void *param)
             trend = data.hr_trend;
             state = data.state;    
             steps = data.steps; 
+            battery = data.battery_p;
         }
 
         xSemaphoreTake(i2cMutex, portMAX_DELAY);
 
-        display_update(bpm, spo2, state, trend, steps);
+        display_update(bpm, spo2, state, trend, steps, battery);
 
         xSemaphoreGive(i2cMutex);
 
@@ -150,23 +167,38 @@ void NetworkTask(void *param) {
     } else {
         printf("WiFi connected\n");
     }
+
     mqtt_init();
 
-    static int counter = 0;
+    sensor_data_t data;
+    static sensor_data_t last_data = {0};
+
+    int counter = 0;
 
     while (1) {
+
         cyw43_arch_poll();
-        sensor_data_t data = {0};
 
+        // ⭐ 非阻塞取資料
         if (xQueueReceive(mqttQueue, &data, 0)) {
-
-            mqtt_publish_data(data.bpm, data.spo2, data.state, data.hr_trend);
+            last_data = data;
         }
+
+        // ⭐ 固定輸出
+        mqtt_publish_data(
+            last_data.bpm,
+            last_data.spo2,
+            last_data.state,
+            last_data.hr_trend,
+            last_data.battery_p
+        );
+
         counter++;
-        if (counter >= 25) {   // 200ms * 25 ≈ 5秒
+        if (counter >= 25) {
             mqtt_publish_heartbeat();
             counter = 0;
         }
+
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
@@ -199,6 +231,7 @@ void ProcessTask(void *param)
 {
     sample_t s;
     sensor_data_t data = {0};
+    battery_data_t bat;
 
     TickType_t lastWake = xTaskGetTickCount();
 
@@ -254,10 +287,47 @@ void ProcessTask(void *param)
         }
 
         // =====================================================
-        // 🔴 3. output（固定節奏）
+        // 🔴 3. battery
+        // =====================================================
+        static battery_data_t last_bat = {0};
+
+        if (xQueueReceive(batteryQueue, &bat, 0)) {
+            last_bat = bat;   // ⭐ 關鍵：更新 cache
+        }
+
+        data.battery_v = last_bat.v;
+        data.battery_p = last_bat.p;
+
+        // =====================================================
+        // 🔴 4. output（固定節奏）
         // =====================================================
         xQueueOverwrite(sensorQueue, &data);
         xQueueOverwrite(mqttQueue, &data);
+    }
+}
+
+void BatteryTask(void *param) {
+
+    float v;
+    int p;
+
+    battery_data_t bat;
+
+    battery_init();
+
+    while (1) {
+
+        battery_update(&v, &p);
+
+        bat.v = v;
+        bat.p = p;
+
+        // ✅ 寫自己的 queue
+        xQueueOverwrite(batteryQueue, &bat);
+
+        printf("[BAT] %.2f V (%d%%)\n", v, p);
+
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 

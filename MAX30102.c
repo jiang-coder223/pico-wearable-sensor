@@ -12,50 +12,62 @@
 #define MIN_LAG 50
 #define MAX_LAG 100
 
-#define SPO2_BUF 100
+#define SPO2_BUF WINDOW_SIZE
 
 #define DEBUG_RAW 0
 #define DEBUG_HR  0
 #define DEBUG_SPO2 0
 
 
-static float data_buffer[WINDOW_SIZE];
-static int data_idx = 0;
-static int averaged_bpm = 0;
-static float lp = 0;
-static float smooth = 0;
-static int last_lag = 0;
-static int init_count = 0;
-static int has_signal = 0;
-static int prev_red = 0;
-static int stable_count = 0;
-static int last_best_lag = 0;
-static float last_confidence = 0;
-static int bad_count = 0;
+static float    data_buffer[WINDOW_SIZE];
+static int      data_idx = 0;
+static int      averaged_bpm = 0;
+static float    lp = 0;
+static float    smooth = 0;
+static int      last_lag = 0;
+static int      init_count = 0;
+static int      has_signal = 0;
+static int      prev_red = 0;
+static int      stable_count = 0;
+static int      last_best_lag = 0;
+static float    last_confidence = 0;
+static int      bad_count = 0;
 
-static float dc_red = 0;
-static float dc_ir  = 0;
-static float red_buf[SPO2_BUF];
-static float ir_buf[SPO2_BUF];
-static int spo2_idx = 0;
-static int spo2_value = 0;
-static float last_R = 0;
-static float g_R = 0;
-static float g_ratio_r = 0;
-static float g_ratio_i = 0;
-static int reject_count = 0;
-static float R_history[5] = {0};
-static int R_idx = 0;
+static float    red_buf[SPO2_BUF];
+static float    ir_buf[SPO2_BUF];
+static int      spo2_idx = 0;
+static int      spo2_value = 0;
+static float    last_R = 0;
+static float    g_R = 0;
+static float    g_ratio_r = 0;
+static float    g_ratio_i = 0;
+static int      reject_count = 0;
+static float    R_history[5] = {0};
+static int      R_idx = 0;
 static uint32_t last_peak_time = 0;
-static int peak_bpm = 0;
-static float peak_threshold = 50.0f;
-static float prev_hp_for_peak = 0;
-static int refractory = 0;
-static float hp = 0;
-static float prev_hp = 0;
-static float prev_smooth = 0;
-static int prev_has_signal = 0;
-static int spo2_init_count = 0;
+static int      peak_bpm = 0;
+static float    peak_threshold = 50.0f;
+static float    prev_hp_for_peak = 0;
+static int      refractory = 0;
+static float    hp = 0;
+static float    prev_hp = 0;
+static float    prev_smooth = 0;
+static int      prev_has_signal = 0;
+static int      spo2_init_count = 0;
+static float    spo2_last_R = 0;
+static int      spo2_stable_count = 0;
+static int      spo2_ready = 0;
+
+
+static float hr_ir_buf[WINDOW_SIZE];
+static float hr_red_buf[WINDOW_SIZE];
+
+static float raw_red_buf[WINDOW_SIZE];
+static float raw_ir_buf[WINDOW_SIZE];
+
+static int rf_idx = 0;
+
+static int last_period = 60;   // 初始假設 ~100 BPM
 
 
 // driver
@@ -151,7 +163,7 @@ void max30102_setup(void) {
     // 4. LED 電流設定 (暫存器 0x0C, 0x0D)
     // 0x24 約為 7.2mA。如果覺得數據太小可以調高到 0x3F (12.5mA)
     write_reg(MAX30102_LED1_PA, 0x3F); 
-    write_reg(MAX30102_LED2_PA, 0x10); 
+    write_reg(MAX30102_LED2_PA, 0x3F); 
     
     // 5. 重要：重設 FIFO 指標 (清空緩衝區)
     // 確保一開始讀取就是最新的數據，不會讀到重置前的殘留值
@@ -180,6 +192,8 @@ void max30102_hr_init(void) {
     bad_count = 0;        
     last_best_lag = 0;     
     last_confidence = 0;
+    rf_idx = 0;
+    last_period = 0;
 
     for (int i = 0; i < WINDOW_SIZE; i++) {
         data_buffer[i] = 0;
@@ -190,22 +204,8 @@ int max30102_get_bpm(void) {
     return averaged_bpm;
 }
 
-void max30102_hr_update(uint32_t red, uint32_t ir) {
-
-    /* //差分演算法之後再補
-    uint32_t diff = (red > prev_red) ? (red - prev_red) : (prev_red - red);
-    prev_red = red;
-
-    if (diff > 2000) {
-        stable_count = 0;
-        return;
-    }
-
-    if (diff < 2000) stable_count++;
-    else stable_count = 0;
-
-    int valid = (stable_count >= 5 && diff < 8000); */
-
+void max30102_hr_update(uint32_t red, uint32_t ir)
+{
     // ===== finger detect =====
     if (!has_signal) {
         if (red > 8000) has_signal = 1;
@@ -220,166 +220,210 @@ void max30102_hr_update(uint32_t red, uint32_t ir) {
     }
 
     prev_has_signal = has_signal;
+    if (!has_signal) return;
 
-    if (!has_signal) {
+    // ===== buffer =====
+    raw_red_buf[rf_idx] = (float)red;
+    raw_ir_buf[rf_idx]  = (float)ir;
+
+    hr_ir_buf[rf_idx]  = (float)ir;
+    hr_red_buf[rf_idx] = (float)red;
+    rf_idx++;
+
+    if (rf_idx < WINDOW_SIZE) return;
+    rf_idx = 0;
+
+    // ===== 1. DC removal =====
+    float ir_mean = 0, red_mean = 0;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        ir_mean  += hr_ir_buf[i];
+        red_mean += hr_red_buf[i];
+    }
+
+    ir_mean /= WINDOW_SIZE;
+    red_mean /= WINDOW_SIZE;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        hr_ir_buf[i]  -= ir_mean;
+        hr_red_buf[i] -= red_mean;
+    }
+
+    printf("[DC] ir=%.1f red=%.1f\n", ir_mean, red_mean);
+
+    // ===== 2. detrend =====
+    float beta_ir = 0, beta_red = 0;
+    float sum_x2 = 0;
+    float x;
+
+    float mean_x = (WINDOW_SIZE - 1) / 2.0f;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        x = i - mean_x;
+        beta_ir  += x * hr_ir_buf[i];
+        beta_red += x * hr_red_buf[i];
+        sum_x2   += x * x;
+    }
+
+    beta_ir  /= sum_x2;
+    beta_red /= sum_x2;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        x = i - mean_x;
+        hr_ir_buf[i]  -= beta_ir  * x;
+        hr_red_buf[i] -= beta_red * x;
+    }
+
+    __asm volatile("" ::: "memory");
+
+    spo2_ready = 1;
+    
+    // ===== 3. RMS =====
+    float ir_sumsq = 0, red_sumsq = 0;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        ir_sumsq  += hr_ir_buf[i]  * hr_ir_buf[i];
+        red_sumsq += hr_red_buf[i] * hr_red_buf[i];
+    }
+
+    ir_sumsq  /= WINDOW_SIZE;
+    red_sumsq /= WINDOW_SIZE;
+
+    float ir_rms  = sqrtf(ir_sumsq);
+    float red_rms = sqrtf(red_sumsq);
+
+    printf("[RMS] ir=%.3f red=%.3f\n", ir_rms, red_rms);
+
+    // ===== 4. correlation =====
+    float corr = 0;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        corr += hr_ir_buf[i] * hr_red_buf[i];
+    }
+
+    corr /= WINDOW_SIZE;
+    corr /= (sqrtf(ir_sumsq * red_sumsq) + 1e-6f);
+
+    printf("[CORR] %.3f\n", corr);
+
+    if (corr < 0.7f) {
+        printf("[SKIP] low corr\n");
         return;
     }
 
-    // ===== DC removal =====
-    if (lp == 0) lp = (float)red;
-    lp = (lp * 0.92f) + (red * 0.08f);
+    // ===== 5. autocorr (RF-style) =====
 
-    // ===== AC Amplifier =====
-    float ac_val = ((float)red - lp) * 5.0f;
+    int search_min, search_max;
 
-    if (fabs(ac_val) > 5000.0f) {
-        ac_val = 0;
+    if (last_period == 0) {
+        search_min = 50;
+        search_max = 120;
+    } else {
+        search_min = last_period - 20;
+        search_max = last_period + 20;
     }
 
-    // ===== smoothing =====
-    smooth = 0.4f * ac_val + 0.6f * smooth;
-    hp = 0.8f * (hp + smooth - prev_smooth);
-    prev_smooth = smooth;
+    if (search_min < 30) search_min = 30;
+    if (search_max > 120) search_max = 120;
 
-    // ===== spike limiter（限制最大幅度）=====
-    if (hp > 1000.0f) hp = 1000.0f;
-    if (hp < -1000.0f) hp = -1000.0f;
+    int best_lag = 0;
+    float best_corr = 0;
 
-    // ===== jump filter（忽略瞬間爆衝）=====
-    if (fabs(hp - prev_hp) > 2000.0f) {
-        hp = prev_hp;
+    float lag0 = ir_sumsq * WINDOW_SIZE;
+    float threshold = 0.4f * lag0;
+
+    // ===== Step 1：找第一個合理 lag =====
+    for (int lag = search_min; lag <= search_max; lag++) {
+
+        float ac = 0;
+
+        for (int i = 0; i < WINDOW_SIZE - lag; i++) {
+            ac += hr_ir_buf[i] * hr_ir_buf[i + lag];
+        }
+
+        if (ac > threshold) {
+            best_lag = lag;
+            best_corr = ac;
+            break;
+        }
     }
 
-    prev_hp = hp;
-    
-    // ===== validity filter =====
-    if (fabs(hp) > 700.0f) {
-        goto skip;   // 被 clamp 的爆訊號，無效
+    if (best_lag == 0) {
+        printf("[RESET] no valid lag\n");
+        return;
     }
 
-    data_buffer[data_idx++] = hp;
+    // ===== Step 2：local peak refine =====
 
-    if (data_idx >= WINDOW_SIZE) {
+    while (best_lag > 50) {
+        float curr = 0, left = 0;
 
-        float max_corr = -1.0f;
-        int best_lag = -1;
-        float zero_corr = 0;
+        for (int i = 0; i < WINDOW_SIZE - best_lag; i++)
+            curr += hr_ir_buf[i] * hr_ir_buf[i + best_lag];
 
-        for (int i = 0; i < WINDOW_SIZE; i++)
-            zero_corr += data_buffer[i] * data_buffer[i];
+        for (int i = 0; i < WINDOW_SIZE - (best_lag - 1); i++)
+            left += hr_ir_buf[i] * hr_ir_buf[i + best_lag - 1];
 
-        float best_score = -1e9;
-
-        for (int lag = MIN_LAG; lag <= MAX_LAG; lag++) {
-            float corr = 0;
-
-            for (int i = 0; i < (WINDOW_SIZE - lag); i++) {
-                corr += data_buffer[i] * data_buffer[i + lag];
-            }
-
-            if (corr > max_corr) {
-                max_corr = corr;
-            }
-
-            float penalty = 0;
-            if (last_lag != 0) {
-                penalty = fabs(lag - last_lag) * 0.01f;
-            }
-
-            float score = corr - penalty;
-
-            if (score > best_score) {
-                best_score = score;
-                best_lag = lag;
-            }
-        }
-
-
-        // ===== confidence =====
-        float confidence = max_corr / zero_corr;
-
-        if (confidence < 0.35f) {
-            goto skip;
-        }
-
-        last_best_lag = best_lag;
-        last_confidence = confidence;
-
-        if (best_lag <= 0) goto skip;
-
-        if (last_lag != 0) {
-            int diff = abs(best_lag - last_lag);
-
-            if (confidence < 0.35f || diff > 12) {
-                bad_count++;
-            } else {
-                bad_count = 0;
-            }
-        }
-
-        if (bad_count > 10) {
-                bad_count = 5;
-        }
-
-        if (best_lag > 0 && confidence > 0.35f) {
-
-            bad_count = 0;
-            if (last_lag != 0 && abs(best_lag - last_lag) > 12)
-                best_lag = last_lag;
-
-            // 半週修正（非常關鍵）
-            if (best_lag * 2 <= MAX_LAG) {
-                int lag2 = best_lag * 2;
-
-                float corr2 = 0;
-                for (int i = 0; i < WINDOW_SIZE - lag2; i++) {
-                    corr2 += data_buffer[i] * data_buffer[i + lag2];
-                }
-
-                if (corr2 > max_corr * 0.75f) {
-                    best_lag = lag2;
-                }
-            }
-
-            if (last_lag != 0) {
-                int diff = abs(best_lag - last_lag);
-
-                if (diff < 12) {
-                        // ✔ 正常範圍 → 做平滑追蹤
-                        best_lag = (int)(0.5f * last_lag + 0.5f * best_lag);
-                }
-            }
-
-            if (best_lag < 50 || best_lag > 120)
-                goto skip;
-
-            int bpm = (SAMPLE_RATE * 60) / best_lag;
-
-            if (bpm < 40 || bpm > 180)
-                goto skip;
-
-            if (averaged_bpm == 0) {
-                init_count++;
-                if (init_count < 2) goto skip;
-
-                averaged_bpm = bpm;
-                last_lag = best_lag;
-                return;
-            }
-
-            if (bpm > averaged_bpm + 8) bpm = averaged_bpm + 8;
-            if (bpm < averaged_bpm - 8) bpm = averaged_bpm - 8;
-
-            averaged_bpm = (averaged_bpm * 0.5f) + (bpm * 0.5f);
-            last_lag = best_lag;
-        }
-
-skip:
-        for (int i = 0; i < WINDOW_SIZE - SLIDE_SIZE; i++) {
-            data_buffer[i] = data_buffer[i + SLIDE_SIZE];
-        }
-        data_idx = WINDOW_SIZE - SLIDE_SIZE;
+        if (left <= curr) break;
+        best_lag--;
     }
+
+    while (best_lag < 120) {
+        float curr = 0, right = 0;
+
+        for (int i = 0; i < WINDOW_SIZE - best_lag; i++)
+            curr += hr_ir_buf[i] * hr_ir_buf[i + best_lag];
+
+        for (int i = 0; i < WINDOW_SIZE - (best_lag + 1); i++)
+            right += hr_ir_buf[i] * hr_ir_buf[i + best_lag + 1];
+
+        if (right <= curr) break;
+        best_lag++;
+    }
+
+    // ⭐ 重新計算 best_corr（很重要）
+    best_corr = 0;
+    for (int i = 0; i < WINDOW_SIZE - best_lag; i++) {
+        best_corr += hr_ir_buf[i] * hr_ir_buf[i + best_lag];
+    }
+
+    float ratio = best_corr / lag0;
+
+    printf("[AC] lag=%d ratio=%.3f\n", best_lag, ratio);
+
+    if (ratio < 0.15f) {
+        printf("[SKIP] low periodic\n");
+        return;
+    }
+
+    // ===== 6. lag stabilize =====
+    if (last_period != 0) {
+        int diff = abs(best_lag - last_period);
+
+        if (diff > 25) {
+            printf("[RESET] lag jump (%d)\n", diff);
+            return;
+        }
+
+        best_lag = (int)(0.7f * last_period + 0.3f * best_lag);
+    }
+
+    last_period = best_lag;
+
+    int bpm = (SAMPLE_RATE * 60) / best_lag;
+
+    if (bpm < 40 || bpm > 180) {
+        printf("[SKIP] bpm out\n");
+        return;
+    }
+
+    // ===== 7. smoothing =====
+    if (averaged_bpm == 0)
+        averaged_bpm = bpm;
+    else
+        averaged_bpm = 0.7f * averaged_bpm + 0.3f * bpm;
+
+    printf("[BPM] %d\n", averaged_bpm);
 }
 
 int max30102_get_lag(void) {
@@ -392,11 +436,11 @@ float max30102_get_confidence(void) {
 
 // SpO2
 void max30102_spo2_init(void) {
-    dc_red = 0;
-    dc_ir  = 0;
 
     spo2_idx = 0;
     spo2_value = 0;
+    spo2_last_R = 0;
+    spo2_stable_count = 0;
 
     last_R = 0;
     g_R = 0;
@@ -425,104 +469,77 @@ void max30102_spo2_init(void) {
 
 void max30102_spo2_update(uint32_t red, uint32_t ir)
 {
+    if (!spo2_ready) return;
+    spo2_ready = 0;
 
-    // ===== 初始化 =====
-    if (init_count < 50) {
-        dc_red = red;
-        dc_ir  = ir;
-        init_count++;
-        return;
+    printf("\n==== SpO2 WINDOW ====\n");
+
+    // ===== DC（raw，同一窗口）=====
+    float dc_red = 0, dc_ir = 0;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        dc_red += raw_red_buf[i];
+        dc_ir  += raw_ir_buf[i];
     }
 
-    // ===== DC tracking =====
-    dc_red = 0.95f * dc_red + 0.05f * red;
-    dc_ir  = 0.95f * dc_ir  + 0.05f * ir;
+    dc_red /= WINDOW_SIZE;
+    dc_ir  /= WINDOW_SIZE;
 
-    // ===== finger detect =====
-    if (dc_red < 10000) {
+    printf("[SpO2-DC] red=%.1f ir=%.1f\n", dc_red, dc_ir);
+
+    if (dc_red < 50000 || dc_ir < 50000) {
+        printf("[SpO2] reject: no finger\n");
         spo2_value = 0;
         return;
     }
 
-    // ===== AC =====
-    float ac_red = red - dc_red;
-    float ac_ir  = ir  - dc_ir;
+    // ===== AC（HR clean）=====
+    float sum_r = 0, sum_i = 0;
 
-    // ===== buffer =====
-    red_buf[spo2_idx] = ac_red;
-    ir_buf[spo2_idx]  = ac_ir;
-    spo2_idx++;
-
-    if (spo2_idx < SPO2_BUF) return;
-    spo2_idx = 0;
-
-    // ===== RMS (差分版，抗漂移) =====
-    float ac_r = 0;
-    float ac_i = 0;
-
-    for (int i = 1; i < SPO2_BUF; i++) {
-        float dr = red_buf[i] - red_buf[i-1];
-        float di = ir_buf[i]  - ir_buf[i-1];
-        ac_r += dr * dr;
-        ac_i += di * di;
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        sum_r += hr_red_buf[i] * hr_red_buf[i];
+        sum_i += hr_ir_buf[i]  * hr_ir_buf[i];
     }
 
-    ac_r = sqrtf(ac_r / SPO2_BUF);
-    ac_i = sqrtf(ac_i / SPO2_BUF);
+    float ac_r = sqrtf(sum_r / WINDOW_SIZE);
+    float ac_i = sqrtf(sum_i / WINDOW_SIZE);
 
-    // ===== ratio =====
-    float ratio_r = ac_r / dc_red;
-    float ratio_i = ac_i / dc_ir;
+    printf("[SpO2-AC] red=%.1f ir=%.1f\n", ac_r, ac_i);
 
-    // ===== 品質 gating（關鍵）=====
-    float signal_strength = ratio_r + ratio_i;
+    // ===== corr =====
+    float corr = 0;
+    float sum_r2 = 0;
+    float sum_i2 = 0;
 
-    // 太弱（雜訊）
-    if (signal_strength < 0.0001f) return;
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        float r = raw_red_buf[i] - dc_red;
+        float i_ = raw_ir_buf[i] - dc_ir;
 
-    // 太強（晃動 / 壓太緊）
-    if (signal_strength > 0.01f) return;
-
-    g_ratio_r = ratio_r;
-    g_ratio_i = ratio_i;
-
-    // ===== 結構檢查（避免假R）=====
-    float balance = ratio_r / ratio_i;
-
-    // 避免兩者太接近（典型 noise 特徵）
-    if (balance > 0.95f && balance < 1.05f && signal_strength < 0.0003f) {
-    return;
+        corr   += r * i_;
+        sum_r2 += r * r;
+        sum_i2 += i_ * i_;
     }
 
-    // ===== 基本 gating（極簡版）=====
-    if (ratio_r < 0.00003f || ratio_i < 0.00003f) return;
-    if (ratio_r > 0.02f   || ratio_i > 0.02f)   return;
+    corr /= WINDOW_SIZE;
+    corr /= (sqrtf(sum_r2 * sum_i2) + 1e-6f);
+
+    printf("[SpO2-CORR] %.3f\n", corr);
 
     // ===== R =====
-    float R = ratio_r / ratio_i;
+    float R = (ac_r * dc_ir) / (ac_i * dc_red);
 
-    // 合理範圍
+    printf("[SpO2-R] %.3f\n", R);
+
     if (R < 0.3f || R > 0.9f) return;
 
-    g_R = R;
-
-    if (last_R != 0 && fabs(R - last_R) > 0.1f) {
-        return;
-    }
-
-    // ===== SpO2 =====
-    last_R = R;
-    int spo2 = (int)(106 - 18 * R);
+    float spo2 = (-45.060f * R + 30.354f) * R + 94.845f;
 
     if (spo2 > 100) spo2 = 100;
-    if (spo2 < 70)  spo2 = 70;
+    if (spo2 < 80)  spo2 = 80;
 
-    // ===== smoothing =====
-    if (spo2_value == 0)
-        spo2_value = spo2;
-    else
-        spo2_value = 0.6f * spo2_value + 0.4f * spo2;
+    spo2_value = spo2;
 
+    printf("[SpO2-OK] %.1f\n", spo2);
 }
 
 int max30102_get_spo2(void) {

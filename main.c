@@ -259,7 +259,7 @@ void ProcessTask(void *param)
         // =====================================================
         // 🔴 2. HR（有資料才更新）
         // =====================================================
-        if (xQueueReceive(sampleQueue, &s, 0))
+        while (xQueueReceive(sampleQueue, &s, 0))
         {
             max30102_hr_update(s.red, s.ir);
             max30102_spo2_update(s.red, s.ir);
@@ -325,7 +325,7 @@ void BatteryTask(void *param) {
         // ✅ 寫自己的 queue
         xQueueOverwrite(batteryQueue, &bat);
 
-        printf("[BAT] %.2f V (%d%%)\n", v, p);
+/*         printf("[BAT] %.2f V (%d%%)\n", v, p); */
 
         vTaskDelay(pdMS_TO_TICKS(2000));
     }

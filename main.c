@@ -14,6 +14,8 @@
 #include "queue.h"
 #include "semphr.h"
 #include "bettery.h"
+#include "lwip/apps/sntp.h"
+#include <time.h>
 
 
 #define STATE_REST       0
@@ -72,6 +74,8 @@ void BatteryTask(void *param);
 void StateTask(void *param);
 hr_trend_t calc_hr_trend(int current, int prev);
 int classify_state(float hr, float act);
+void time_sync_init(void);
+void wait_time_sync(void);
 
     int main() {
 
@@ -175,10 +179,21 @@ void NetworkTask(void *param) {
         printf("WiFi connect failed\n");
     } else {
         printf("WiFi connected\n");
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
+        while (netif_default == NULL ||
+            netif_default->ip_addr.addr == 0) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        ip_addr_t ntp_server;
+        IP4_ADDR(&ntp_server, 216, 239, 35, 0); // Google NTP
 
-    mqtt_init();
+        sntp_setserver(0, &ntp_server);
+        sntp_init();
+        printf("TIME(before NTP) = %d\n", (int)time(NULL));
+        wait_time_sync();
+        printf("TIME(after NTP) = %d\n", (int)time(NULL));
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        mqtt_init();
+    }
 
     sensor_data_t data;
     static sensor_data_t last_data = {0};
@@ -232,7 +247,6 @@ void NetworkTask(void *param) {
         send_cnt++;
         if (send_cnt >= 10) {
 
-            printf("[DEBUG] send status\n");
             mqtt_publish_status(
                 last_data.bpm,
                 last_data.spo2,
@@ -477,4 +491,19 @@ int classify_state(float hr, float act)
 
     // ⭐ HIGH：明顯活動
     return STATE_HIGH_LOAD;
+}
+
+void time_sync_init() {
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_init();
+}
+
+void wait_time_sync() {
+    while (time(NULL) < 1700000000) {
+        cyw43_arch_poll(); 
+        printf("Waiting NTP...\n");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    printf("Time synced: %d\n", (int)time(NULL));
 }

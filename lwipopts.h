@@ -40,4 +40,11 @@
 #define TCP_SND_BUF 4096
 #define TCP_WND     4096
 
+#define LWIP_SNTP 1
+#define SNTP_SET_SYSTEM_TIME(sec) sntp_set_system_time(sec)
+#define SNTP_SERVER_DNS 1
+#define LWIP_DNS 1
+
+#include "time_sync.h"
+
 #endif

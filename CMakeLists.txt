@@ -39,6 +39,7 @@ add_executable(main
     MQTT.c
     SSD1306.c
     bettery.c
+    time_sync.c
 )
 
 pico_set_program_name(main "main")
@@ -55,6 +56,8 @@ target_link_libraries(main
     hardware_adc
     pico_cyw43_arch_lwip_threadsafe_background
     pico_lwip_mqtt
+    pico_lwip_sntp
+    hardware_rtc
 )
 
 # --- 包含目錄設定 ---

@@ -5,16 +5,14 @@
 #include "math.h"
 
 #define FS_HZ              100.0f
-
 #define HPF_CUTOFF_HZ      0.3f
 #define LPF_CUTOFF_HZ      5.0f
-
 #define INIT_THRESHOLD     0.02f
 #define TH_FACTOR          1.2f
-
 #define MIN_STEP_MS        300
 #define MAX_STEP_MS        2000
 #define REFRACTORY_MS      300
+#define CAD_BUF 2
 
 typedef struct {
     float y;
@@ -26,9 +24,16 @@ typedef struct {
 } LPF;
 
 static int state = 0;
-static int steps = 0;
 static float g_ax, g_ay, g_az;
 static float g_gx, g_gy, g_gz;
+
+static uint32_t dt_buf[CAD_BUF];
+static int steps = 0;
+static int dt_idx = 0;
+static int dt_count = 0;
+static int walking = 0;
+static float g_activity = 0.0f;
+
 
 // 定義變數實體
 int32_t ax_offset = 0, ay_offset = 0, az_offset = 0;
@@ -145,13 +150,14 @@ void mpu6050_activity_update(void)
     float dynamic = fabsf(mag - gravity);
 
     energy = 0.8f * energy + 0.2f * dynamic;
+    g_activity = energy; 
 
     if (energy < 0.05f) {
         baseline = 0.99f * baseline + 0.01f * energy;
     }
 
-    float th_move   = baseline * 3.0f;
-    float th_active = baseline * 8.0f;
+    float th_move   = baseline * 8.0f;
+    float th_active = baseline * 20.0f;
 
     switch (state) {
         case 0:
@@ -271,8 +277,10 @@ void mpu6050_step_counter_update(void)
     // =========================================================
     int accel_valid = 0;
 
+    float slope = prev - x;   // peak下降幅度
+
     if (prev > threshold && prev > x && passed_negative) {
-        if (prev > threshold * 2.0f)
+        if (prev > threshold * 1.0f && slope > threshold * 0.5f)
             accel_valid = 1;
     }
 
@@ -288,17 +296,48 @@ void mpu6050_step_counter_update(void)
         }
 
         // 節奏限制
-        if (dt < 250) goto update_state;
+        if (dt < 500) goto update_state;
 
         if (dt > 1500) {
             last_step_ms = now;
             goto update_state;
         }
 
+          // 🔴 收集 cadence
+        dt_buf[dt_idx] = dt;
+        dt_idx = (dt_idx + 1) % CAD_BUF;
+        if (dt_count < CAD_BUF) dt_count++;
+
+        // 🔴 判斷 cadence 穩定
+        int stable = 1;
+
+        if (dt_count >= CAD_BUF) {
+            uint32_t min = dt_buf[0], max = dt_buf[0];
+
+            for (int i = 1; i < CAD_BUF; i++) {
+                if (dt_buf[i] < min) min = dt_buf[i];
+                if (dt_buf[i] > max) max = dt_buf[i];
+            }
+
+            if (max - min > 500) stable = 0;
+        } else {
+            stable = 0;
+        }
+
+        if (stable) walking = 1;
+
+        // ❗ 沒進 walking 不計步
+        if (!walking) goto update_state;
+
         // ✅ 計步
         steps++;
         last_step_ms = now;
         passed_negative = 0;
+    }
+    else {
+        // 🔴 reset cadence
+        dt_count = 0;
+        walking = 0;
     }
 
 update_state:
@@ -316,4 +355,9 @@ update_state:
         printf("[STEP] x=%.3f th=%.3f gyro=%.1f steps=%d\n",
                x, threshold, gyro_mag, steps);
     } */
+}
+
+float mpu6050_get_activity(void)
+{
+    return g_activity;
 }

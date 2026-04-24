@@ -16,17 +16,15 @@
 #include "bettery.h"
 
 
-
-#define DEBUG_RAW 0
-#define DEBUG_HR  0
-#define DEBUG_SPO2 0
-#define DEBUG_IMU 0
-#define DEBUG_ALL 0
+#define STATE_REST       0
+#define STATE_ACTIVE     1
+#define STATE_HIGH_LOAD  2
 
 QueueHandle_t sensorQueue;
 QueueHandle_t batteryQueue;
 QueueHandle_t mqttQueue;
 QueueHandle_t sampleQueue;
+QueueHandle_t stateQueue;
 SemaphoreHandle_t i2cMutex;
 
 
@@ -38,6 +36,7 @@ typedef struct {
     int state;
     int hr_trend;
     int steps;
+    float activity;
     float battery_v;   
     int   battery_p;
 } sensor_data_t;
@@ -59,12 +58,20 @@ typedef enum {
     HR_FALLING
 } hr_trend_t;
 
+typedef struct {
+    int state;
+    float hr_avg;
+    float act_avg;
+} state_data_t;
+
 void DisplayTask(void *param);
 void NetworkTask(void *param);
 void ReadTask(void *param);
 void ProcessTask(void *param);
 void BatteryTask(void *param);
+void StateTask(void *param);
 hr_trend_t calc_hr_trend(int current, int prev);
+int classify_state(float hr, float act);
 
     int main() {
 
@@ -100,14 +107,16 @@ hr_trend_t calc_hr_trend(int current, int prev);
         sensorQueue = xQueueCreate(1, sizeof(sensor_data_t));
         batteryQueue = xQueueCreate(1, sizeof(battery_data_t));
         mqttQueue = xQueueCreate(1, sizeof(sensor_data_t));
+        stateQueue = xQueueCreate(1, sizeof(state_data_t));
         sampleQueue = xQueueCreate(128, sizeof(sample_t));
 
         // 建 task
         xTaskCreate(ReadTask,    "read",    1024, NULL, 2, NULL);
         xTaskCreate(ProcessTask, "proc",    2048, NULL, 3, NULL);
-        /* xTaskCreate(NetworkTask, "NET",     2048, NULL, 1, NULL); */
+        xTaskCreate(NetworkTask, "NET",     2048, NULL, 1, NULL);
         xTaskCreate(DisplayTask, "Display", 512, NULL, 1, NULL);
         xTaskCreate(BatteryTask, "BAT", 1024, NULL, 1, NULL);
+        xTaskCreate(StateTask, "STATE", 1024, NULL, 2, NULL);
 
         // 啟動 RTOS
         vTaskStartScheduler();
@@ -125,10 +134,10 @@ void DisplayTask(void *param)
     int steps = 0;
     int battery = 0;
 
-
     while (1)
     {
-        if (xQueueReceive(sensorQueue, &data, 0)) {
+        // ⭐ 改成 mqttQueue
+        if (xQueuePeek(sensorQueue, &data, 0)) {
             bpm   = data.bpm;
             spo2  = data.spo2;
             trend = data.hr_trend;
@@ -166,36 +175,85 @@ void NetworkTask(void *param) {
         printf("WiFi connect failed\n");
     } else {
         printf("WiFi connected\n");
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 
     mqtt_init();
 
     sensor_data_t data;
     static sensor_data_t last_data = {0};
+    state_data_t sdata;
+
+    // ===== summary cache（30秒資料）=====
+    static float last_hr_avg = 0;
+    static float last_act_avg = 0;
+    static int   last_state30 = STATE_REST;
 
     int counter = 0;
+    int send_cnt = 0;
+    int reconnect_cnt = 0;
 
     while (1) {
 
         cyw43_arch_poll();
 
-        // ⭐ 非阻塞取資料
+        // =========================
+        // MQTT reconnect
+        // =========================
+        if (!mqtt_is_ready()) {
+            reconnect_cnt++;
+
+            if (reconnect_cnt >= 25) {   // 約 5 秒
+                printf("[MQTT] reconnecting...\n");
+                mqtt_init();
+                reconnect_cnt = 0;
+            }
+        } else {
+            reconnect_cnt = 0;
+        }
+
+        // =========================
+        // data flow
+        // =========================
         if (xQueueReceive(mqttQueue, &data, 0)) {
             last_data = data;
         }
 
-        // ⭐ 固定輸出
-        mqtt_publish_data(
-            last_data.bpm,
-            last_data.spo2,
-            last_data.state,
-            last_data.hr_trend,
-            last_data.battery_p
-        );
+        // ⭐ 30秒 summary（只存，不直接 publish）
+        if (xQueueReceive(stateQueue, &sdata, 0)) {
+            last_hr_avg  = sdata.hr_avg;
+            last_act_avg = sdata.act_avg;
+            last_state30 = sdata.state;
+        }
 
+        // =========================
+        // 每 1 秒送 status
+        // =========================
+        send_cnt++;
+        if (send_cnt >= 10) {
+
+            printf("[DEBUG] send status\n");
+            mqtt_publish_status(
+                last_data.bpm,
+                last_data.spo2,
+                last_data.state,
+                last_data.hr_trend,
+                last_data.steps,
+                last_data.battery_p,
+                last_hr_avg,
+                last_act_avg,
+                last_state30
+            );
+
+            send_cnt = 0;
+        }
+
+        // =========================
+        // availability（取代 heartbeat）
+        // =========================
         counter++;
         if (counter >= 25) {
-            mqtt_publish_heartbeat();
+            mqtt_publish_availability(1);
             counter = 0;
         }
 
@@ -240,13 +298,10 @@ void ProcessTask(void *param)
 
     while (1)
     {
-        // ✅ 固定 100Hz（核心）
         vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(10));
 
-        // =====================================================
-        // 🔴 1. IMU（永遠跑，不管 HR）
-        // =====================================================
-        xSemaphoreTake(i2cMutex, portMAX_DELAY);   // 🔴 一定要拿到
+        // ===== IMU =====
+        xSemaphoreTake(i2cMutex, portMAX_DELAY);
         mpu6050_update();
         xSemaphoreGive(i2cMutex);
 
@@ -255,10 +310,9 @@ void ProcessTask(void *param)
 
         data.state = mpu6050_get_state();
         data.steps = mpu6050_get_steps();
+        data.activity = mpu6050_get_activity();   // ⭐ 新增
 
-        // =====================================================
-        // 🔴 2. HR（有資料才更新）
-        // =====================================================
+        // ===== HR =====
         while (xQueueReceive(sampleQueue, &s, 0))
         {
             max30102_hr_update(s.red, s.ir);
@@ -286,21 +340,17 @@ void ProcessTask(void *param)
             data.hr_trend = current_trend;
         }
 
-        // =====================================================
-        // 🔴 3. battery
-        // =====================================================
+        // ===== battery =====
         static battery_data_t last_bat = {0};
 
         if (xQueueReceive(batteryQueue, &bat, 0)) {
-            last_bat = bat;   // ⭐ 關鍵：更新 cache
+            last_bat = bat;
         }
 
         data.battery_v = last_bat.v;
         data.battery_p = last_bat.p;
 
-        // =====================================================
-        // 🔴 4. output（固定節奏）
-        // =====================================================
+        // ===== output =====
         xQueueOverwrite(sensorQueue, &data);
         xQueueOverwrite(mqttQueue, &data);
     }
@@ -308,6 +358,8 @@ void ProcessTask(void *param)
 
 void BatteryTask(void *param) {
 
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    
     float v;
     int p;
 
@@ -331,6 +383,70 @@ void BatteryTask(void *param) {
     }
 }
 
+void StateTask(void *param)
+{
+    sensor_data_t data;
+    state_data_t state_data;
+
+    static float hr_sum = 0;
+    static float act_sum = 0;
+    static int count = 0;
+
+    static int current_state = STATE_REST;
+    static uint32_t start_time = 0;
+    static uint32_t last_sample_time = 0;
+
+    while (1)
+    {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+
+        if (start_time == 0)
+            start_time = now;
+
+        // ⭐ 10Hz sampling（避免重複累加同一筆）
+        if (now - last_sample_time >= 100)
+        {
+            if (xQueuePeek(sensorQueue, &data, 0))
+            {
+                if (data.bpm > 40 && data.bpm < 180)
+                {
+                    hr_sum += data.bpm;
+                    act_sum += data.activity;
+                    count++;
+                }
+            }
+            last_sample_time = now;
+        }
+
+        // ⭐ 30秒統計
+        if (now - start_time >= 30000)
+        {
+            if (count > 0)
+            {
+                state_data.hr_avg  = hr_sum / count;
+                state_data.act_avg = act_sum / count;
+
+                current_state = classify_state(
+                    state_data.hr_avg,
+                    state_data.act_avg
+                );
+
+                state_data.state = current_state;
+
+                xQueueOverwrite(stateQueue, &state_data);
+            }
+
+            // reset
+            hr_sum = 0;
+            act_sum = 0;
+            count = 0;
+            start_time = now;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
     printf("Stack overflow: %s\n", pcTaskName);
     while (1);
@@ -347,4 +463,18 @@ hr_trend_t calc_hr_trend(int current, int prev) {
     if (diff > 0) return HR_RISING;     
     if (diff < 0) return HR_FALLING;
     return HR_STABLE;
+}
+
+int classify_state(float hr, float act)
+{
+    // ⭐ REST：幾乎沒動
+    if (act < 0.015f && hr < 85)
+        return STATE_REST;
+
+    // ⭐ ACTIVE：正常活動
+    if (act < 0.08f && hr < 110)
+        return STATE_ACTIVE;
+
+    // ⭐ HIGH：明顯活動
+    return STATE_HIGH_LOAD;
 }

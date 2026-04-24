@@ -5,559 +5,369 @@
 #include "global_defines.h"
 #include "stdlib.h"
 #include "math.h"
+#include "pico/time.h"
+#include <string.h>
 
-#define SAMPLE_RATE 100
-#define WINDOW_SIZE 256
-#define SLIDE_SIZE 128
-#define MIN_LAG 50
-#define MAX_LAG 100
+/* ═══════════════════════════════════════════════════════════════
+ * Tunables
+ * ═══════════════════════════════════════════════════════════════ */
+#define SAMPLE_RATE     100         /* Hz                           */
+#define WINDOW_SIZE     200         /* samples  (2 s @ 100 Hz)      */
+#define STEP_SIZE       (WINDOW_SIZE / 2)   /* 50 % overlap         */
 
-#define SPO2_BUF WINDOW_SIZE
+#define AC_THRESHOLD    0.05f       /* autocorr / lag0 gate         */
+#define RATIO_MIN       0.08f       /* periodicity ratio floor      */
+#define CORR_MIN        0.70f       /* IR-RED cross-corr floor      */
+#define PI_MIN          0.0001f     /* perfusion index floor        */
+#define PI_MAX          0.05f       /* motion-artifact ceiling      */
+#define QUALITY_GOOD    50.0f       /* quality score for conf++     */
+#define RMS_FROZEN      5.0f        /* below this = dead signal     */
+#define CONF_MAX        5
+#define LAG_JUMP_MAX    25          /* samples — hard lag reset     */
+#define NO_LAG_RESET    3           /* streak count — reopen search */
+#define LOG_FAIL_EVERY  10          /* print fail msg every N times */
 
-#define DEBUG_RAW 0
-#define DEBUG_HR  0
-#define DEBUG_SPO2 0
+/* ═══════════════════════════════════════════════════════════════
+ * HR state  (static — no VLA on Pico stack)
+ * ═══════════════════════════════════════════════════════════════ */
 
+/* ===== HR (band-pass + peak) ===== */
 
-static float    data_buffer[WINDOW_SIZE];
-static int      data_idx = 0;
-static int      averaged_bpm = 0;
-static float    lp = 0;
-static float    smooth = 0;
-static int      last_lag = 0;
-static int      init_count = 0;
-static int      has_signal = 0;
-static int      prev_red = 0;
-static int      stable_count = 0;
-static int      last_best_lag = 0;
-static float    last_confidence = 0;
-static int      bad_count = 0;
+static float lp = 0, hp = 0, prev_lp = 0;
+static float prev1 = 0, prev2 = 0;
+static float threshold = 1000;
 
-static float    red_buf[SPO2_BUF];
-static float    ir_buf[SPO2_BUF];
-static int      spo2_idx = 0;
-static int      spo2_value = 0;
-static float    last_R = 0;
-static float    g_R = 0;
-static float    g_ratio_r = 0;
-static float    g_ratio_i = 0;
-static int      reject_count = 0;
-static float    R_history[5] = {0};
-static int      R_idx = 0;
 static uint32_t last_peak_time = 0;
-static int      peak_bpm = 0;
-static float    peak_threshold = 50.0f;
-static float    prev_hp_for_peak = 0;
-static int      refractory = 0;
-static float    hp = 0;
-static float    prev_hp = 0;
-static float    prev_smooth = 0;
-static int      prev_has_signal = 0;
-static int      spo2_init_count = 0;
-static float    spo2_last_R = 0;
-static int      spo2_stable_count = 0;
-static int      spo2_ready = 0;
 
+static float averaged_bpm = 0;
+static int has_signal = 0;
+static int prev_has_signal = 0;
+static int peak_count = 0;
 
-static float hr_ir_buf[WINDOW_SIZE];
-static float hr_red_buf[WINDOW_SIZE];
+/* ═══════════════════════════════════════════════════════════════
+ * SpO2 state
+ * ═══════════════════════════════════════════════════════════════ */
+static float spo2_red_buf[WINDOW_SIZE];
+static float spo2_ir_buf [WINDOW_SIZE];
+static int   spo2_idx          = 0;
+static int   spo2_value        = 0;
+static float g_R               = 0.0f;
+static float last_valid_R      = 0.0f;
 
-static float raw_red_buf[WINDOW_SIZE];
-static float raw_ir_buf[WINDOW_SIZE];
-
-static int rf_idx = 0;
-
-static int last_period = 60;   // 初始假設 ~100 BPM
-
-
-// driver
-static int write_reg(uint8_t reg, uint8_t value) {
+/* ═══════════════════════════════════════════════════════════════
+ * Low-level I²C helpers
+ * ═══════════════════════════════════════════════════════════════ */
+static int write_reg(uint8_t reg, uint8_t value)
+{
     uint8_t buf[2] = {reg, value};
     return i2c_write_timeout_us(I2C0_PORT, MAX30102_ADDR, buf, 2, false, 1000);
 }
 
-static int read_reg(uint8_t reg, uint8_t *value) {
+static int read_reg(uint8_t reg, uint8_t *value)
+{
     int ret = i2c_write_timeout_us(I2C0_PORT, MAX30102_ADDR, &reg, 1, true, 1000);
     if (ret < 0) return ret;
-
     return i2c_read_timeout_us(I2C0_PORT, MAX30102_ADDR, value, 1, false, 1000);
 }
 
-void max30102_init(void) {
+/* ═══════════════════════════════════════════════════════════════
+ * Hardware init / setup
+ * ═══════════════════════════════════════════════════════════════ */
+void max30102_init(void)
+{
     uint8_t data;
-
     printf("Init MAX30102...\n");
 
-    // 讀 PART ID
     int ret = read_reg(MAX30102_PART_ID, &data);
-    if (ret < 0) {
-        printf("Read PART_ID failed\n");
-        return;
-    }
-
+    if (ret < 0) { printf("Read PART_ID failed\n"); return; }
     printf("PART_ID = 0x%02X\n", data);
 
-    // reset
-    ret = write_reg(MAX30102_MODE_CONFIG, 0x40);
-    if (ret < 0) {
-        printf("Reset failed\n");
-        return;
-    }
-
+    ret = write_reg(MAX30102_MODE_CONFIG, 0x40);   /* soft-reset */
+    if (ret < 0) { printf("Reset failed\n"); return; }
     sleep_ms(100);
-
     printf("Init done\n");
 }
 
+void max30102_setup(void)
+{
+    /* FIFO: no averaging, roll-over enabled */
+    write_reg(MAX30102_FIFO_CONFIG, 0x10);
 
-int max30102_read_fifo(uint32_t *red, uint32_t *ir) {
+    /* SpO2 mode (Red + IR), 4096 nA range, 100 Hz, 411 µs pulse */
+    write_reg(MAX30102_MODE_CONFIG, 0x03);
+    write_reg(MAX30102_SPO2_CONFIG, 0x47);
 
-    uint8_t wr = 0, rd = 0;
+    /* LED current ~18.8 mA  (0x5F).  Raise to 0x7F (~25 mA) for wrist. */
+    write_reg(MAX30102_LED1_PA, 0x24);
+    write_reg(MAX30102_LED2_PA, 0x24);
 
-    if (read_reg(MAX30102_FIFO_WR_PTR, &wr) < 0) return -1;
-    if (read_reg(MAX30102_FIFO_RD_PTR, &rd) < 0) return -1;
-
-    int available = (wr - rd) & 0x1F;
-
-    if (available <= 0) {
-        return 0;   // 沒資料
-    }
-
-    uint8_t reg = MAX30102_FIFO_DATA;
-    uint8_t data[6];
-
-    int ret = i2c_write_timeout_us(I2C0_PORT, MAX30102_ADDR, &reg, 1, true, 1000);
-    if (ret < 0) return -1;
-
-    // ✅ 只讀一筆
-    ret = i2c_read_timeout_us(I2C0_PORT, MAX30102_ADDR, data, 6, false, 1000);
-    if (ret < 0) return -1;
-
-    *red = ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
-    *red &= 0x03FFFF;
-
-    *ir  = ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5];
-    *ir &= 0x03FFFF;
-
-    return 1;   // ✅ 固定回傳1
-}
-
-// config
-void max30102_setup(void) {
-    // 1. FIFO Configuration (暫存器 0x08)
-    // SMP_AVE (bit 7-5): 000 = No averaging (不平均，反應最快)
-    // FIFO_ROLLOVER_EN (bit 4): 1 = 滿了自動覆蓋舊數據
-    // FIFO_A_FULL (bit 3-0): 0xF = 剩下 15 格時觸發中斷 (我們目前沒用到中斷可忽略)
-    write_reg(MAX30102_FIFO_CONFIG, 0x10); 
-
-    // 2. Mode Config (暫存器 0x09)
-    // 0x03 為 SpO2 模式 (同時開啟 Red + IR)
-    write_reg(MAX30102_MODE_CONFIG, 0x03); 
-    
-    // 3. SpO2 Config (暫存器 0x0A)
-    // SPO2_ADC_RGE (bit 6-5): 01 = 4096nA 範圍
-    // SPO2_SR (bit 4-2): 001 = 100Hz 採樣率
-    // LED_PW (bit 1-0): 11 = 411us 脈衝寬度 (18-bit 解析度)
-    write_reg(MAX30102_SPO2_CONFIG, 0x47); 
-    
-    // 4. LED 電流設定 (暫存器 0x0C, 0x0D)
-    // 0x24 約為 7.2mA。如果覺得數據太小可以調高到 0x3F (12.5mA)
-    write_reg(MAX30102_LED1_PA, 0x3F); 
-    write_reg(MAX30102_LED2_PA, 0x3F); 
-    
-    // 5. 重要：重設 FIFO 指標 (清空緩衝區)
-    // 確保一開始讀取就是最新的數據，不會讀到重置前的殘留值
+    /* Clear FIFO */
     write_reg(MAX30102_FIFO_WR_PTR, 0x00);
     write_reg(MAX30102_OVF_COUNTER, 0x00);
     write_reg(MAX30102_FIFO_RD_PTR, 0x00);
-    
-    printf("MAX30102 Optimized Setup Done.\n");
+
+    printf("MAX30102 setup done.\n");
 }
 
+int max30102_read_fifo(uint32_t *red, uint32_t *ir)
+{
+    uint8_t wr = 0, rd = 0;
+    if (read_reg(MAX30102_FIFO_WR_PTR, &wr) < 0) return -1;
+    if (read_reg(MAX30102_FIFO_RD_PTR, &rd) < 0) return -1;
 
-// heart rate
-void max30102_hr_init(void) {
-    data_idx = 0;
-    averaged_bpm = 0;
-    lp = 0;
-    smooth = 0;
-    last_lag = 0;
-    init_count = 0;
+    if (((wr - rd) & 0x1F) <= 0) return 0;
+
+    uint8_t reg  = MAX30102_FIFO_DATA;
+    uint8_t data[6];
+
+    if (i2c_write_timeout_us(I2C0_PORT, MAX30102_ADDR, &reg, 1, true,  1000) < 0) return -1;
+    if (i2c_read_timeout_us (I2C0_PORT, MAX30102_ADDR, data, 6, false, 1000) < 0) return -1;
+
+    *red = (((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2]) & 0x03FFFF;
+    *ir  = (((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5]) & 0x03FFFF;
+    return 1;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * HR — init / getters
+ * ═══════════════════════════════════════════════════════════════ */
+void max30102_hr_init(void)
+{
+    averaged_bpm = 0.0f;
+
     has_signal = 0;
-    prev_red = 0;
-    stable_count = 0;
-    hp = 0;
-    prev_hp = 0;
-    prev_smooth = 0;
-    bad_count = 0;        
-    last_best_lag = 0;     
-    last_confidence = 0;
-    rf_idx = 0;
-    last_period = 0;
+    prev_has_signal = 0;
 
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        data_buffer[i] = 0;
-    }
+    lp = hp = prev_lp = 0.0f;
+    prev1 = prev2 = 0.0f;
+
+    threshold = 0.0f;
+
+    last_peak_time = 0;
 }
 
-int max30102_get_bpm(void) {
-    return averaged_bpm;
-}
+int   max30102_get_bpm      (void) { return (int)(averaged_bpm + 0.5f); }
+int   max30102_has_signal   (void) { return has_signal; }
 
+/* ───────────────────────────────────────────────────────────────
+ * Inline helper: suppress repeated failure spam.
+ * Prints the message only on the 1st failure and every
+ * LOG_FAIL_EVERY-th one after that.
+ * ─────────────────────────────────────────────────────────────── */
+
+/* ═══════════════════════════════════════════════════════════════
+ * HR — main update  (call once per sample, i.e. at 100 Hz)
+ * ═══════════════════════════════════════════════════════════════ */
 void max30102_hr_update(uint32_t red, uint32_t ir)
 {
-    // ===== finger detect =====
+    /* ── 0. finger detect ── */
     if (!has_signal) {
-        if (red > 8000) has_signal = 1;
+        if (ir > 20000) has_signal = 1;
     } else {
-        if (red < 4000) has_signal = 0;
+        if (ir < 10000) has_signal = 0;
     }
 
     if (!has_signal && prev_has_signal) {
         max30102_hr_init();
         max30102_spo2_init();
-        return;
+        last_peak_time = 0;
+        printf("[RESET] finger removed\n");
     }
 
     prev_has_signal = has_signal;
     if (!has_signal) return;
 
-    // ===== buffer =====
-    raw_red_buf[rf_idx] = (float)red;
-    raw_ir_buf[rf_idx]  = (float)ir;
+    /* ── 1. Band-pass ── */
+    lp = 0.9f * lp + 0.1f * ir;
+    hp = lp - prev_lp + 0.95f * hp;
+    prev_lp = lp;
 
-    hr_ir_buf[rf_idx]  = (float)ir;
-    hr_red_buf[rf_idx] = (float)red;
-    rf_idx++;
+    float signal = hp;
 
-    if (rf_idx < WINDOW_SIZE) return;
-    rf_idx = 0;
+    /* ── 2. threshold（稍微加快反應） ── */
+    float abs_sig = fabsf(signal);
+    threshold = 0.85f * threshold + 0.15f * abs_sig;
 
-    // ===== 1. DC removal =====
-    float ir_mean = 0, red_mean = 0;
+    /* ── 3. slope peak detect ── */
+    float slope1 = prev1 - prev2;
+    float slope2 = signal - prev1;
 
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        ir_mean  += hr_ir_buf[i];
-        red_mean += hr_red_buf[i];
-    }
+    static float expected_interval = 0.0f;
+    static float last_peak_value = 0.0f;
 
-    ir_mean /= WINDOW_SIZE;
-    red_mean /= WINDOW_SIZE;
+    float slope_ratio = prev1 / (prev2 + 1e-6f);
 
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        hr_ir_buf[i]  -= ir_mean;
-        hr_red_buf[i] -= red_mean;
-    }
+    if (slope1 > 0 && slope2 < 0 &&
+        prev1 > threshold * 1.25f &&
+        slope_ratio > 1.02f)   // ⭐ 關鍵修正（通用）
+    {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
 
-    printf("[DC] ir=%.1f red=%.1f\n", ir_mean, red_mean);
-
-    // ===== 2. detrend =====
-    float beta_ir = 0, beta_red = 0;
-    float sum_x2 = 0;
-    float x;
-
-    float mean_x = (WINDOW_SIZE - 1) / 2.0f;
-
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        x = i - mean_x;
-        beta_ir  += x * hr_ir_buf[i];
-        beta_red += x * hr_red_buf[i];
-        sum_x2   += x * x;
-    }
-
-    beta_ir  /= sum_x2;
-    beta_red /= sum_x2;
-
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        x = i - mean_x;
-        hr_ir_buf[i]  -= beta_ir  * x;
-        hr_red_buf[i] -= beta_red * x;
-    }
-
-    __asm volatile("" ::: "memory");
-
-    spo2_ready = 1;
-    
-    // ===== 3. RMS =====
-    float ir_sumsq = 0, red_sumsq = 0;
-
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        ir_sumsq  += hr_ir_buf[i]  * hr_ir_buf[i];
-        red_sumsq += hr_red_buf[i] * hr_red_buf[i];
-    }
-
-    ir_sumsq  /= WINDOW_SIZE;
-    red_sumsq /= WINDOW_SIZE;
-
-    float ir_rms  = sqrtf(ir_sumsq);
-    float red_rms = sqrtf(red_sumsq);
-
-    printf("[RMS] ir=%.3f red=%.3f\n", ir_rms, red_rms);
-
-    // ===== 4. correlation =====
-    float corr = 0;
-
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        corr += hr_ir_buf[i] * hr_red_buf[i];
-    }
-
-    corr /= WINDOW_SIZE;
-    corr /= (sqrtf(ir_sumsq * red_sumsq) + 1e-6f);
-
-    printf("[CORR] %.3f\n", corr);
-
-    if (corr < 0.7f) {
-        printf("[SKIP] low corr\n");
-        return;
-    }
-
-    // ===== 5. autocorr (RF-style) =====
-
-    int search_min, search_max;
-
-    if (last_period == 0) {
-        search_min = 50;
-        search_max = 120;
-    } else {
-        search_min = last_period - 20;
-        search_max = last_period + 20;
-    }
-
-    if (search_min < 30) search_min = 30;
-    if (search_max > 120) search_max = 120;
-
-    int best_lag = 0;
-    float best_corr = 0;
-
-    float lag0 = ir_sumsq * WINDOW_SIZE;
-    float threshold = 0.4f * lag0;
-
-    // ===== Step 1：找第一個合理 lag =====
-    for (int lag = search_min; lag <= search_max; lag++) {
-
-        float ac = 0;
-
-        for (int i = 0; i < WINDOW_SIZE - lag; i++) {
-            ac += hr_ir_buf[i] * hr_ir_buf[i + lag];
+        if (last_peak_time == 0) {
+            last_peak_time = now;
+            last_peak_value = prev1;
+            goto shift;
         }
 
-        if (ac > threshold) {
-            best_lag = lag;
-            best_corr = ac;
-            break;
-        }
-    }
+        uint32_t interval = now - last_peak_time;
 
-    if (best_lag == 0) {
-        printf("[RESET] no valid lag\n");
-        return;
-    }
-
-    // ===== Step 2：local peak refine =====
-
-    while (best_lag > 50) {
-        float curr = 0, left = 0;
-
-        for (int i = 0; i < WINDOW_SIZE - best_lag; i++)
-            curr += hr_ir_buf[i] * hr_ir_buf[i + best_lag];
-
-        for (int i = 0; i < WINDOW_SIZE - (best_lag - 1); i++)
-            left += hr_ir_buf[i] * hr_ir_buf[i + best_lag - 1];
-
-        if (left <= curr) break;
-        best_lag--;
-    }
-
-    while (best_lag < 120) {
-        float curr = 0, right = 0;
-
-        for (int i = 0; i < WINDOW_SIZE - best_lag; i++)
-            curr += hr_ir_buf[i] * hr_ir_buf[i + best_lag];
-
-        for (int i = 0; i < WINDOW_SIZE - (best_lag + 1); i++)
-            right += hr_ir_buf[i] * hr_ir_buf[i + best_lag + 1];
-
-        if (right <= curr) break;
-        best_lag++;
-    }
-
-    // ⭐ 重新計算 best_corr（很重要）
-    best_corr = 0;
-    for (int i = 0; i < WINDOW_SIZE - best_lag; i++) {
-        best_corr += hr_ir_buf[i] * hr_ir_buf[i + best_lag];
-    }
-
-    float ratio = best_corr / lag0;
-
-    printf("[AC] lag=%d ratio=%.3f\n", best_lag, ratio);
-
-    if (ratio < 0.15f) {
-        printf("[SKIP] low periodic\n");
-        return;
-    }
-
-    // ===== 6. lag stabilize =====
-    if (last_period != 0) {
-        int diff = abs(best_lag - last_period);
-
-        if (diff > 25) {
-            printf("[RESET] lag jump (%d)\n", diff);
-            return;
+        /* ── 4. interval 限制 ── */
+        if (interval < 600 || interval > 1500) {
+            last_peak_time = now;
+            goto shift;
         }
 
-        best_lag = (int)(0.7f * last_period + 0.3f * best_lag);
+        /* ── 5. peak 強度過濾（砍次波） ── */
+        if (last_peak_value > 0) {
+            if (prev1 < last_peak_value * 0.4f) {
+                last_peak_time = now;
+                goto shift;
+            }
+        }
+
+        /* ── 6. 節奏一致性 ── */
+        if (expected_interval > 0)
+        {
+            float ratio = interval / expected_interval;
+
+            if (ratio < 0.75f) {
+                last_peak_time = now;
+                goto shift;
+            }
+
+            if (ratio > 1.6f) {
+                interval *= 0.5f;
+            }
+
+        }
+
+        float bpm = 60000.0f / interval;
+
+        /* ── 7. BPM 範圍 ── */
+        if (bpm < 50 || bpm > 120) {
+            last_peak_time = now;
+            goto shift;
+        }
+
+        /* ── 8. 抗跳動 ── */
+        if (peak_count > 3 && averaged_bpm > 0 && fabsf(bpm - averaged_bpm) > 15){
+            last_peak_time = now;
+            goto shift;
+        }
+
+        /* ── 9. 平滑 ── */
+        if (averaged_bpm <= 2)
+            averaged_bpm = bpm;
+        else
+            averaged_bpm = 0.6f * averaged_bpm + 0.4f * bpm;
+
+        /* ── 10. 更新節奏 ── */
+        float cur_interval = 60000.0f / averaged_bpm;
+
+        peak_count++;
+
+        if (peak_count > 3)   // ⭐ 前3拍不建立節奏
+        {
+            if (expected_interval == 0)
+                expected_interval = cur_interval;
+            else
+                expected_interval = 0.9f * expected_interval + 0.1f * cur_interval;
+        }
+
+        printf("[PEAK] %d ms BPM=%.0f\n", interval, bpm);
+        printf("[BPM] %d\n", (int)averaged_bpm);
+
+        last_peak_time = now;
+        last_peak_value = prev1;
     }
 
-    last_period = best_lag;
-
-    int bpm = (SAMPLE_RATE * 60) / best_lag;
-
-    if (bpm < 40 || bpm > 180) {
-        printf("[SKIP] bpm out\n");
-        return;
-    }
-
-    // ===== 7. smoothing =====
-    if (averaged_bpm == 0)
-        averaged_bpm = bpm;
-    else
-        averaged_bpm = 0.7f * averaged_bpm + 0.3f * bpm;
-
-    printf("[BPM] %d\n", averaged_bpm);
+shift:
+    prev2 = prev1;
+    prev1 = signal;
 }
 
-int max30102_get_lag(void) {
-    return last_best_lag;
-}
-
-float max30102_get_confidence(void) {
-    return last_confidence;
-}
-
-// SpO2
-void max30102_spo2_init(void) {
-
-    spo2_idx = 0;
-    spo2_value = 0;
-    spo2_last_R = 0;
-    spo2_stable_count = 0;
-
-    last_R = 0;
-    g_R = 0;
-    g_ratio_r = 0;
-    g_ratio_i = 0;
-
-    reject_count = 0;
-    R_idx = 0;
-
-    spo2_init_count = 0;
-
-    //  buffer 清空
-    for (int i = 0; i < SPO2_BUF; i++) {
-        red_buf[i] = 0;
-        ir_buf[i]  = 0;
-    }
-
-    // R history 清空
-    for (int i = 0; i < 5; i++) {
-        R_history[i] = 0;
-    }
-
-    // DC 初始化狀態
-    // （會重新 warm-up）
+/* ═══════════════════════════════════════════════════════════════
+ * SpO2
+ * ═══════════════════════════════════════════════════════════════ */
+void max30102_spo2_init(void)
+{
+    spo2_value   = 0;
+    spo2_idx     = 0;
+    g_R          = 0.0f;
+    last_valid_R = 0.0f;
+    memset(spo2_red_buf, 0, sizeof(spo2_red_buf));
+    memset(spo2_ir_buf,  0, sizeof(spo2_ir_buf));
 }
 
 void max30102_spo2_update(uint32_t red, uint32_t ir)
 {
-    if (!spo2_ready) return;
-    spo2_ready = 0;
+    if (!has_signal) { spo2_idx = 0; return; }
 
-    printf("\n==== SpO2 WINDOW ====\n");
+    spo2_red_buf[spo2_idx] = (float)red;
+    spo2_ir_buf [spo2_idx] = (float)ir;
+    spo2_idx++;
+    if (spo2_idx < WINDOW_SIZE) return;
+    spo2_idx = 0;
 
-    // ===== DC（raw，同一窗口）=====
-    float dc_red = 0, dc_ir = 0;
-
+    /* DC */
+    float red_mean = 0.0f, ir_mean = 0.0f;
     for (int i = 0; i < WINDOW_SIZE; i++) {
-        dc_red += raw_red_buf[i];
-        dc_ir  += raw_ir_buf[i];
+        red_mean += spo2_red_buf[i];
+        ir_mean  += spo2_ir_buf[i];
     }
+    red_mean /= WINDOW_SIZE;
+    ir_mean  /= WINDOW_SIZE;
 
-    dc_red /= WINDOW_SIZE;
-    dc_ir  /= WINDOW_SIZE;
+    if (red_mean < 1000.0f || ir_mean < 1000.0f) return;
 
-    printf("[SpO2-DC] red=%.1f ir=%.1f\n", dc_red, dc_ir);
-
-    if (dc_red < 50000 || dc_ir < 50000) {
-        printf("[SpO2] reject: no finger\n");
-        spo2_value = 0;
-        return;
-    }
-
-    // ===== AC（HR clean）=====
-    float sum_r = 0, sum_i = 0;
-
+    /* AC RMS */
+    float red_ac = 0.0f, ir_ac = 0.0f;
     for (int i = 0; i < WINDOW_SIZE; i++) {
-        sum_r += hr_red_buf[i] * hr_red_buf[i];
-        sum_i += hr_ir_buf[i]  * hr_ir_buf[i];
+        float r = spo2_red_buf[i] - red_mean;
+        float v = spo2_ir_buf[i]  - ir_mean;
+        red_ac += r * r;
+        ir_ac  += v * v;
     }
+    red_ac = sqrtf(red_ac / WINDOW_SIZE);
+    ir_ac  = sqrtf(ir_ac  / WINDOW_SIZE);
 
-    float ac_r = sqrtf(sum_r / WINDOW_SIZE);
-    float ac_i = sqrtf(sum_i / WINDOW_SIZE);
+    if (red_ac < 30.0f || ir_ac < 30.0f) return;
 
-    printf("[SpO2-AC] red=%.1f ir=%.1f\n", ac_r, ac_i);
+    float ratio_r = red_ac / red_mean;
+    float ratio_i = ir_ac  / ir_mean;
 
-    // ===== corr =====
-    float corr = 0;
-    float sum_r2 = 0;
-    float sum_i2 = 0;
+    /* Perfusion gate — same logic as HR */
+    if (ratio_r < 0.0008f || ratio_i < 0.0008f) return;
+    if (ratio_i > PI_MAX)  return;   /* motion artifact */
 
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        float r = raw_red_buf[i] - dc_red;
-        float i_ = raw_ir_buf[i] - dc_ir;
+    /* R = (AC_red/DC_red) / (AC_ir/DC_ir) */
+    float R = ratio_r / ratio_i;
+    if (R < 0.4f || R > 3.4f) return;   /* physically impossible range */
 
-        corr   += r * i_;
-        sum_r2 += r * r;
-        sum_i2 += i_ * i_;
-    }
+    /* Reject large R jumps */
+    if (g_R != 0.0f && fabsf(R - g_R) > 0.3f) return;
 
-    corr /= WINDOW_SIZE;
-    corr /= (sqrtf(sum_r2 * sum_i2) + 1e-6f);
+    /* Smooth R with slow EMA (changes slowly with SpO2) */
+    g_R = (g_R == 0.0f) ? R : (0.95f * g_R + 0.05f * R);
 
-    printf("[SpO2-CORR] %.3f\n", corr);
-
-    // ===== R =====
-    float R = (ac_r * dc_ir) / (ac_i * dc_red);
-
-    printf("[SpO2-R] %.3f\n", R);
-
-    if (R < 0.3f || R > 0.9f) return;
-
-    float spo2 = (-45.060f * R + 30.354f) * R + 94.845f;
+    /*
+     * Linear empirical approximation:
+     *   SpO2 ≈ 110 − 25×R   (valid for R ≈ 0.4 – 1.0, SpO2 95–100 %)
+     * For lower saturation extend with:
+     *   SpO2 ≈ 104 − 17×R   (R 1.0 – 2.0, SpO2 80–95 %)
+     */
+    int spo2;
+    if (g_R <= 1.0f)
+        spo2 = (int)(110.0f - 25.0f * g_R + 0.5f);
+    else
+        spo2 = (int)(104.0f - 17.0f * g_R + 0.5f);
 
     if (spo2 > 100) spo2 = 100;
-    if (spo2 < 80)  spo2 = 80;
+    if (spo2 < 70)  spo2 = 70;
 
-    spo2_value = spo2;
-
-    printf("[SpO2-OK] %.1f\n", spo2);
+    spo2_value   = spo2;
+    last_valid_R = g_R;
 }
 
-int max30102_get_spo2(void) {
-    return spo2_value;
-}
-
-float max30102_get_R(void) {
-    return g_R;
-}
-
-float max30102_get_ratio_r(void) {
-    return g_ratio_r;
-}
-
-float max30102_get_ratio_i(void) {
-    return g_ratio_i;
-}
-
-int max30102_has_signal(void) {
-    return has_signal;
-}
+int   max30102_get_spo2(void) { return spo2_value; }
+float max30102_get_R   (void) { return g_R; }

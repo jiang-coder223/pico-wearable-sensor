@@ -29,4 +29,15 @@
 #define MEMP_NUM_TCP_SEG 32
 #define MEMP_NUM_TCP_PCB 5
 
+// ===== MQTT（關鍵）=====
+#define MQTT_OUTPUT_RINGBUF_SIZE 1024
+
+// ===== PBUF（關鍵）=====
+#define PBUF_POOL_SIZE 32
+#define PBUF_POOL_BUFSIZE 512
+
+// ===== TCP（你已經有，但我幫你固定）=====
+#define TCP_SND_BUF 4096
+#define TCP_WND     4096
+
 #endif

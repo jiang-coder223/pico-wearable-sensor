@@ -21,5 +21,6 @@ int mpu6050_get_state(void);
 void mpu6050_activity_update(void);
 int mpu6050_get_steps(void);
 void mpu6050_step_counter_update(void);
+float mpu6050_get_activity(void);
 
 #endif

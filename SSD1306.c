@@ -14,7 +14,7 @@ void SSD1306_cmd(uint8_t cmd) {
 }
 
 void SSD1306_data(uint8_t* data, size_t len) {
-    uint8_t temp[1025];
+    uint8_t temp[1024];
     temp[0] = 0x40;
     memcpy(&temp[1], data, len);
     i2c_write_blocking(I2C0_PORT, SSD1306_ADDR, temp, len + 1, false);
